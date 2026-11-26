@@ -1,0 +1,449 @@
+/**
+ * Gemini 에이전트 루프.
+ * Gemini에게 도구(조건 갱신, 탐색, 조건 완화, 상세, 문의, 되묻기, 답변)를 주고,
+ * 어떤 도구를 어떤 순서로 부를지 Gemini가 정해요. 실패하면 null → 기본 파이프라인으로 넘어가요.
+ */
+import {
+  attachPlaces,
+  availabilityOf,
+  chipsFor,
+  estimateNote,
+  extrasFor,
+  describe,
+  detailWithPlace,
+  lookupCampsByName,
+  campByRank,
+  typesOf,
+  draftOf,
+  missingInfo,
+  relaxOf,
+  resultText,
+  searchOf,
+} from './agent';
+import { evalCond, loadCamps, originCoords, type Camp } from './data';
+import { applyPlaces, mergeDelta } from './interpret';
+import { AGENT_MODELS, CATALOG, SCHEMA, dateContext, generate, type LlmResult } from './llm';
+import { parse } from './parse';
+import type { Availability } from './availability';
+import type { AgentReply, AgentState, DetailCard, ExtraPlace, Places, Relax, TraceStep } from './types';
+
+const MAX_STEPS = 7;
+
+const reason = { type: 'STRING', description: '이 도구를 지금 부르는 이유 한 줄 (사용자 화면에 보여요)' };
+
+// update_conditions 인자는 조건 해석 스키마에서 intent/refIndex를 뺀 것
+const { intent: _i, refIndex: _r, ...deltaProps } = (SCHEMA as { properties: Record<string, unknown> }).properties;
+
+const TOOLS = [
+  {
+    functionDeclarations: [
+      {
+        name: 'update_conditions',
+        description: '사용자의 새 말에서 새로 나왔거나 바뀐 조건만 반영해요. 바뀌지 않은 필드는 넣지 마세요.',
+        parameters: { type: 'OBJECT', properties: { reason, ...deltaProps } },
+      },
+      {
+        name: 'reset_conditions',
+        description: '사용자가 처음부터 다시 찾자고 할 때 모든 조건을 지워요.',
+        parameters: { type: 'OBJECT', properties: { reason } },
+      },
+      {
+        name: 'search_camps',
+        description:
+          '현재 조건으로 공공데이터(전국 등록 캠핑장)에서 캠핑장을 찾아요. 결과 수, 단계별 남은 수, 상위 5곳 요약을 돌려줘요. 결과를 바꾸는 정보가 빠졌으면 need_info와 함께 물어볼 질문과 버튼 문구를 돌려줘요.',
+        parameters: { type: 'OBJECT', properties: { reason } },
+      },
+      {
+        name: 'suggest_relaxations',
+        description: '결과가 없거나 적을 때, 어떤 조건을 풀면 몇 곳이 늘어나는지 계산해요.',
+        parameters: { type: 'OBJECT', properties: { reason } },
+      },
+      {
+        name: 'get_camp_detail',
+        description: '직전 결과 표의 N번 캠핑장 상세 정보를 가져와요.',
+        parameters: { type: 'OBJECT', properties: { reason, rank: { type: 'INTEGER' } }, required: ['rank'] },
+      },
+      {
+        name: 'get_camp_by_name',
+        description: '사용자가 캠핑장 이름을 말하며 정보를 물을 때, 결과 표와 상관없이 전국 데이터에서 이름으로 찾아 상세 정보를 가져와요. 비슷한 이름이 여러 곳이면 후보 목록을 돌려줘요.',
+        parameters: { type: 'OBJECT', properties: { reason, name: { type: 'STRING', description: '캠핑장 이름 (지역을 알면 "이름 (시군)")' } }, required: ['name'] },
+      },
+      {
+        name: 'check_availability',
+        description:
+          '직전 결과 표의 N번 캠핑장의 실제 빈자리를 확인해요. 지금은 캠핑톡 공공 캠핑장만 자동 확인이 되고(검색 결과의 빈자리확인가능=true), 나머지는 unsupported를 돌려줘요. 날짜가 없으면 need_date를 돌려줘요.',
+        parameters: { type: 'OBJECT', properties: { reason, rank: { type: 'INTEGER' } }, required: ['rank'] },
+      },
+      {
+        name: 'draft_inquiry',
+        description: '직전 결과 표의 N번 캠핑장에 보낼 문의 메시지 초안을 써요. 확인이 필요한 조건만 물어봐요.',
+        parameters: { type: 'OBJECT', properties: { reason, rank: { type: 'INTEGER' } }, required: ['rank'] },
+      },
+      {
+        name: 'ask_user',
+        description: '결과를 바꾸는 정보가 빠졌을 때만 사용자에게 물어요. 이번 턴을 끝내요.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            question: { type: 'STRING' },
+            options: { type: 'ARRAY', items: { type: 'STRING' }, description: '사용자가 눌러서 그대로 보낼 짧은 답 2~5개' },
+          },
+          required: ['question'],
+        },
+      },
+      {
+        name: 'finish',
+        description: '사용자에게 답하고 이번 턴을 끝내요.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            message: { type: 'STRING', description: '무엇을 찾았고 왜 이렇게 골랐는지 2~3문장. 도구 결과에 있는 숫자와 이름만 써요.' },
+            suggestions: { type: 'ARRAY', items: { type: 'STRING' }, description: '다음에 누를 만한 요청 3~5개. 사용자가 그대로 보낼 짧은 문장.' },
+          },
+          required: ['message'],
+        },
+      },
+    ],
+  },
+];
+
+function systemPrompt(prev: AgentState) {
+  const current = {
+    origin: prev.origin,
+    maxMinutes: prev.maxMinutes,
+    regions: prev.regions,
+    dateLabel: prev.dateLabel,
+    people: prev.people,
+    pet: prev.pet,
+    petSize: prev.petSize,
+    conditions: prev.conds.map((c) => ({ key: c.key, label: c.label, must: c.must })),
+    lastResultCount: prev.lastIds?.length ?? 0,
+  };
+  return `너는 StayScout, 사용자가 말한 조건에 맞는 "갈 수 있는 캠핑장"을 찾아 주는 에이전트야.
+목표: 사용자의 목표를 이해하고, 도구로 실제 데이터를 확인해서, 근거와 함께 가장 잘 맞는 곳을 제시해.
+
+${dateContext()}
+
+[지금까지의 조건]
+${JSON.stringify(current)}
+
+[일하는 방식]
+1. 사용자의 말에 조건이 새로 나오거나 바뀌면 먼저 update_conditions를 불러. 바뀐 것만 넣어.
+2. 그다음 search_camps로 찾아. need_info가 오면 그 question과 options를 그대로 ask_user로 물어봐.
+3. 결과가 3곳 미만이면 suggest_relaxations를 부르고, 무엇을 풀면 몇 곳이 늘어나는지 finish에서 안내해.
+4. "N번 자세히/정보"는 get_camp_detail, 캠핑장 이름을 말하며 정보·어때·알려 줘 하면(번호 없이) get_camp_by_name, "N번에 문의/물어봐"는 draft_inquiry, "N번 빈자리/예약 가능?"은 check_availability를 부른 뒤 finish.
+   - finish의 suggestions에 "N번 빈자리 확인해 줘"는 빈자리확인가능=true인 곳에만 넣어. 그런 곳이 없으면 빈자리 관련 제안을 넣지 마.
+   - 사용자가 번호 없이 "빈자리까지 확인해 줘"라고 하면, 검색 결과 중 빈자리확인가능=true인 곳을 골라 check_availability를 불러. 그런 곳이 없으면 자동 확인이 안 된다고 정직하게 말해.
+   - 빈자리는 check_availability가 status ok를 돌려준 경우에만 "남아 있다/없다"고 말해. unsupported면 "자동으로 확인할 수 없는 예약처"라고 말하고 절대 추측하지 마.
+5. "처음부터 다시"는 reset_conditions 후 finish로 어떤 조건을 원하는지 물어.
+6. 반드시 ask_user 또는 finish로 끝내. 한 번에 도구 하나씩 불러.
+
+[조건 다루기]
+- must: "꼭, 필요, 필수, 있어야" 또는 별말 없으면 true. "있으면 좋겠어, 가능하면, 선호, ~면 좋겠어"는 false.
+
+[답변 규칙]
+- 한국어 해요체(~해요), 짧고 구체적으로. 도구 결과에 없는 사실·숫자·장소를 지어내지 마.
+- 와이파이·전기·놀이터·반려견·입지 같은 조건은 공공데이터로 이미 확인된 거야. "확인 필요"라고 말해도 되는 건 search_camps 결과의 확인필요 목록에 있는 조건뿐이야.
+- "조용함", "사이트 간격" 같은 판단형 조건은 사이트 간 거리, 사이트 수, 입지, 소개글로 추정해. 추정_근거가 있으면 "추정"이라고 밝히고 근거를 짧게 말해. 근거가 없으면 "확인 필요"라고 정직하게 말해.
+- 사용자가 가장 강조한 조건(예: 조용함)에 대해 답변의 첫 문장에서 직접 답해.
+- 사용자가 특정 캠핑장의 특정 조건(예: 개인화장실, 바비큐)을 물으면 get_camp_detail/get_camp_by_name 결과의 조건_판정으로 첫 문장에서 바로 답해. 추정이면 근거 문구와 함께 '추정'이라고 밝혀. 사용자가 이름을 정정하면(예: '포천에 있는 거') 그 지역을 붙여 get_camp_by_name을 다시 불러.
+- get_camp_detail 결과의 안내(링크가 열리지 않음, 전화번호 자릿수 오류, 카카오맵 이름 다름, 카카오맵 미등록)는 답변에서 빠뜨리지 말고 짧게 전해 줘.
+- top5에 예약_링크가 '열리지 않음'이면 그곳을 소개할 때 "등록된 링크가 열리지 않는다"고 한 줄 알려 줘.
+- top5에 카카오맵_지금_이름이 있으면 "등록된 이름과 카카오맵 이름이 달라 예약 링크가 옛 정보일 수 있다"고 그곳에 한 줄로 알려 줘. 정보_기준이 있는 곳을 1위로 소개할 때도 "예약 전 전화 확인"을 덧붙여.
+- 조건_미확인_추가가 있으면 "카카오맵에서 N곳을 더 찾았지만 시설 정보가 없어 순위에는 넣지 않았다"고 한 줄로만 알려 줘. 그곳들을 추천 순위에 넣지 마.
+- 사용자는 '고캠핑'이 뭔지 모를 수 있어. 답변에 '고캠핑'이라는 이름을 쓰지 말고 필요하면 '공공 캠핑장 정보'라고 해.
+- 몇 곳 찾았는지는 반드시 조건에_맞는_곳 숫자로 말해. 후보_전체_확인필요_포함은 확인 못 한 곳이 섞인 수라서 "조건에 맞는 N곳"이라고 쓰면 안 돼. 두 수가 다르면 "후보 N곳 중 M곳이 조건에 맞아요"처럼 둘 다 말해. 1위는 반드시 top5의 rank 1이야.
+- top5의 유형에 "텐트 사이트 없음"이 있으면 그곳은 카라반·글램핑 객실만 있는 곳이야. 소개할 때 "텐트는 못 치고 카라반(글램핑) 숙박만 되는 곳"이라고 분명히 말해.
+- finish의 message는 채팅에 그대로 보이는 글이야. 3문장 이내로 짧게: 몇 곳 찾았는지, 1위와 고른 이유, 꼭 알아야 할 주의점 하나. 결과 표는 화면 오른쪽에 따로 보이니까 2위 이하를 나열하거나 표 내용을 반복하지 마.
+- finish의 suggestions 예: "1번 자세히 보기", "2번 숙소에 문의 메시지 써 줘", "온라인 예약 되는 곳만", 조건 완화 문구(도구가 준 label 그대로).
+
+[update_conditions의 조건 key 목록]
+${CATALOG}
+- 날짜·인원·지역·출발지·반려견·이동 시간은 conditions가 아니라 각자의 필드에 넣어. "우리 집", "현재 위치"는 origin에 넣지 마.
+- "이번 주말", "다음주 주말"은 위 날짜를 그대로 checkIn에 써.`;
+}
+
+/** 한 캠핑장에 대해 자주 묻는 조건과 지금 대화의 조건을 판정해서 Gemini에게 넘겨요 (질문에 바로 답할 수 있게) */
+const COMMON_CHECKS: [string, string][] = [
+  ['toilet', '개인화장실'],
+  ['sbrs:전기', '전기'],
+  ['sbrs:온수', '온수'],
+  ['sbrs:무선인터넷', '와이파이'],
+  ['judge:바비큐', '바비큐'],
+  ['brazier', '개별 화로대'],
+  ['lend:난방기구', '난방기구 대여'],
+  ['sbrs:놀이터', '놀이터'],
+];
+function verdictsFor(camp: Camp, state: AgentState) {
+  const V = { yes: '확인됨', likely: '추정', no: '아님', unknown: '확인 필요' } as const;
+  const keys = new Map<string, string>(COMMON_CHECKS);
+  for (const c of state.conds) keys.set(c.key, c.label);
+  const out: Record<string, string> = {};
+  if (state.pet) {
+    const p = evalCond('pet', camp, state.petSize, typesOf(state));
+    out['반려견'] = `${V[p.v]} · ${p.text}`;
+  }
+  for (const [k, label] of keys) {
+    const r = evalCond(k, camp, state.petSize, typesOf(state));
+    out[label] = `${V[r.v]} · ${r.text}`;
+  }
+  return out;
+}
+
+const LABEL: Record<string, string> = {
+  update_conditions: '조건 정리',
+  reset_conditions: '조건 초기화',
+  search_camps: '캠핑장 탐색',
+  suggest_relaxations: '조건 완화 계산',
+  get_camp_detail: '상세 정보 확인',
+  get_camp_by_name: '이름으로 찾기',
+  draft_inquiry: '문의 메시지 작성',
+  ask_user: '사용자에게 질문',
+  check_availability: '빈자리 확인',
+  finish: '답변',
+};
+
+type Part = { text?: string; functionCall?: { name: string; args?: Record<string, unknown> }; thoughtSignature?: string };
+
+export async function runAgentLoop(text: string, prev: AgentState, places?: Places): Promise<AgentReply | null> {
+  if (!process.env.GEMINI_API_KEY) return null;
+
+  const regionNames = [...new Set(loadCamps().camps.map((c) => c.sigunguNm).filter(Boolean))];
+  const originOk = (n: string) => !!originCoords(n);
+  const rules = parse(text, prev, regionNames);
+
+  let state: AgentState = structuredClone(prev);
+  state.conds = [...(prev.conds || [])];
+  state.regions = [...(prev.regions || [])];
+  let needHome = applyPlaces(text, state, places);
+  let updated = false;
+
+  const trace: TraceStep[] = [];
+  let search: ReturnType<typeof searchOf> | null = null;
+  let relax: Relax[] = [];
+  let detail: { text: string; detail: DetailCard } | null = null;
+  let draft: { text: string; draft: string } | null = null;
+  let avail: { text: string; availability?: Availability } | null = null;
+  let extras: ExtraPlace[] = [];
+
+  const contents: { role: string; parts: unknown[] }[] = [{ role: 'user', parts: [{ text }] }];
+  let model: (typeof AGENT_MODELS)[number] | null = null;
+
+  for (let step = 0; step < MAX_STEPS; step++) {
+    const body = {
+      systemInstruction: { parts: [{ text: systemPrompt(prev) }] },
+      contents,
+      tools: TOOLS,
+      toolConfig: { functionCallingConfig: { mode: 'ANY' } },
+      generationConfig: { temperature: 0 },
+    };
+    let data: { candidates?: { content?: { role: string; parts: Part[] } }[] } | null = null;
+    if (model) data = await generate(model, body);
+    else {
+      // 첫 호출에서 쓸 수 있는 모델을 정하고, 이번 턴은 같은 모델로 끝까지 가요.
+      for (const m of AGENT_MODELS) {
+        data = await generate(m, body);
+        if (data) {
+          model = m;
+          break;
+        }
+      }
+    }
+    const content = data?.candidates?.[0]?.content;
+    if (!content?.parts?.length) return null;
+    contents.push(content);
+
+    const calls = content.parts.filter((p) => p.functionCall).map((p) => p.functionCall!);
+    if (!calls.length) {
+      const t = content.parts.map((p) => p.text || '').join('').trim();
+      if (!t) return null;
+      calls.push({ name: 'finish', args: { message: t } });
+    }
+
+    const responses: unknown[] = [];
+    for (const call of calls) {
+      const args = (call.args || {}) as Record<string, unknown>;
+      const why = typeof args.reason === 'string' ? args.reason : undefined;
+
+      if (call.name === 'ask_user' || call.name === 'finish') {
+        trace.push({ tool: call.name, label: LABEL[call.name] });
+        if (!updated && call.name === 'finish' && !search && !detail && !draft) {
+          // 아무 도구도 안 쓰고 끝내려 하면 규칙 기반 보완만 하고 넘어가요
+          state = mergeDelta({ intent: 'search' }, state, rules.state, regionNames, originOk, text);
+        }
+        return build(call.name, args);
+      }
+
+      let result: Record<string, unknown>;
+      switch (call.name) {
+        case 'update_conditions': {
+          state = mergeDelta({ intent: 'search', ...(args as Partial<LlmResult>) }, state, rules.state, regionNames, originOk, text);
+          needHome = applyPlaces(text, state, places) || needHome;
+          updated = true;
+          result = { 현재조건: describe(state).map((u) => `${u.tone === 'must' ? '필수' : u.tone === 'pref' ? '선호' : ''} ${u.label}`.trim()) };
+          trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: `${describe(state).length}개 조건` });
+          break;
+        }
+        case 'reset_conditions': {
+          state = { regions: [], conds: [] };
+          search = null;
+          result = { ok: true };
+          trace.push({ tool: call.name, label: LABEL[call.name], reason: why });
+          break;
+        }
+        case 'search_camps': {
+          if (!updated) {
+            state = mergeDelta({ intent: 'search' }, state, rules.state, regionNames, originOk, text);
+            needHome = applyPlaces(text, state, places) || needHome;
+            updated = true;
+          }
+          const miss = missingInfo(state, needHome, places);
+          if (miss) {
+            result = { status: 'need_info', question: miss.text, options: miss.chips };
+            trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: '정보 부족' });
+            break;
+          }
+          search = searchOf(state);
+          await attachPlaces(search.rows);
+          extras = await extrasFor(state);
+          result = {
+            조건_미확인_추가: extras.length ? `${extras.length}곳 (카카오 장소 검색, 시설·반려견 조건 확인 안 됨)` : '없음',
+            status: 'ok',
+            // 숫자를 말할 때는 "조건에_맞는_곳"만 써요. 후보_전체에는 확인 못 한 곳이 섞여 있어요.
+            조건에_맞는_곳: search.mustOk,
+            후보_전체_확인필요_포함: search.total,
+            stages: search.stages.map((s) => `${s.label}: ${s.count}곳${s.note ? ` (${s.note})` : ''}`),
+            top5: search.rows.slice(0, 5).map((r) => ({
+              rank: r.rank,
+              name: r.name,
+              area: r.area,
+              유형: r.type,
+              minutes: r.minutes,
+              빈자리확인가능: !!r.liveCheck,
+              ...(r.reserve.dead ? { 예약_링크: '열리지 않음(도메인 없음 등)' } : {}),
+              ...(r.stale ? { 정보_기준: `공공 정보 ${r.asOf} 갱신 (1년 넘게 갱신 안 됨)` } : {}),
+              ...(r.place?.renamed ? { 카카오맵_지금_이름: r.place.name, 전화: r.place.phone } : {}),
+              추정_근거: Object.entries(r.cells)
+                .filter(([, c]) => c.v === 'likely')
+                .map(([k, c]) => `${state.conds.find((x) => x.key === k)?.label ?? k}: ${c.text}`),
+              확인필요: Object.entries(r.cells)
+                .filter(([, c]) => c.v === 'unknown')
+                .map(([k]) => state.conds.find((c) => c.key === k)?.label ?? k),
+            })),
+            확인필요_곳수: search.unknownCount,
+          };
+          trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: `${search.total.toLocaleString()}곳` });
+          break;
+        }
+        case 'suggest_relaxations': {
+          relax = relaxOf(state);
+          result = { options: relax.map((r) => ({ label: r.label, 늘어나는_곳수: r.gain })) };
+          trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: `${relax.length}가지` });
+          break;
+        }
+        case 'get_camp_detail': {
+          const d = await detailWithPlace(state, Number(args.rank));
+          detail = d ? { text: d.text, detail: d.detail } : null;
+          result = d
+            ? { name: d.detail.name, facts: d.detail.facts, 조건_판정: verdictsFor(campByRank(state, Number(args.rank))!, state), links: d.detail.links.map((l) => l.label), 안내: d.text }
+            : { error: '그 번호의 숙소가 없어요.' };
+          trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: d?.detail.name });
+          break;
+        }
+        case 'get_camp_by_name': {
+          const found = lookupCampsByName(String(args.name || ''));
+          if (found.length === 1) {
+            const camp = found[0];
+            const rank = (state.lastIds ?? []).indexOf(camp.contentId) + 1;
+            const d = rank > 0 ? await detailWithPlace(state, rank) : await detailWithPlace({ ...state, lastIds: [camp.contentId] }, 1);
+            detail = d ? { text: rank > 0 ? d.text : d.text.replace(/^1번 /, ''), detail: d.detail } : null;
+            result = d ? { name: d.detail.name, facts: d.detail.facts, 조건_판정: verdictsFor(camp, state), links: d.detail.links.map((l) => l.label), 안내: d.text } : { error: '상세를 만들지 못했어요.' };
+          } else if (found.length > 1) {
+            result = { 후보: found.slice(0, 8).map((c) => `${c.facltNm} (${c.sigunguNm})`), 안내: '이름이 비슷한 곳이 여러 곳이에요. 사용자에게 어느 곳인지 물어봐.' };
+          } else {
+            result = { error: '그 이름의 캠핑장을 전국 데이터에서 찾지 못했어요.' };
+          }
+          trace.push({ tool: call.name, label: '이름으로 찾기', reason: why, result: found.length === 1 ? found[0].facltNm : `${found.length}곳` });
+          break;
+        }
+        case 'check_availability': {
+          const a = await availabilityOf(state, Number(args.rank));
+          if (!a) {
+            result = { error: '그 번호의 숙소가 없어요.' };
+          } else if (a.needDate) {
+            result = { status: 'need_date', question: a.text, options: a.chips };
+          } else {
+            avail = { text: a.text, availability: a.availability };
+            const v = a.availability!;
+            result =
+              v.status === 'ok'
+                ? { status: 'ok', 숙소: v.camp, 날짜: v.dateLabel, 확인시각: v.checkedAt, 출처: v.platform, 구역별_남은자리: v.zones.map((z) => ({ 구역: z.name, 남은: z.left, '1박최저가': z.minPrice })) }
+                : { status: v.status, 숙소: v.camp, 예약처: v.platform, 안내: v.reason };
+          }
+          trace.push({
+            tool: call.name,
+            label: LABEL[call.name],
+            reason: why,
+            result: a?.availability?.status === 'ok' ? `${a.availability.totalLeft}자리` : a?.availability ? '자동 확인 불가' : undefined,
+          });
+          break;
+        }
+        case 'draft_inquiry': {
+          const d = draftOf(state, Number(args.rank));
+          draft = d ? { text: d.text, draft: d.draft } : null;
+          result = d ? { name: d.name, 물어볼_항목: d.asks, tel: d.tel } : { error: '그 번호의 숙소가 없어요.' };
+          trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: d?.name });
+          break;
+        }
+        default:
+          result = { error: `알 수 없는 도구: ${call.name}` };
+      }
+      responses.push({ functionResponse: { name: call.name, response: result } });
+    }
+    contents.push({ role: 'user', parts: responses });
+  }
+  return null; // 단계 제한 초과 → 기본 파이프라인
+
+  function build(tool: string, args: Record<string, unknown>): AgentReply {
+    const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.length <= 40) : []);
+    if (tool === 'ask_user') {
+      const options = strs(args.options);
+      return {
+        kind: 'ask',
+        text: String(args.question || '조금 더 알려 주세요.'),
+        state,
+        understood: describe(state),
+        chips: options.length ? options : missingInfo(state, needHome, places)?.chips ?? [],
+        engine: 'agent',
+        trace,
+      };
+    }
+    const message = String(args.message || '');
+    const suggestions = strs(args.suggestions).slice(0, 5);
+    if (draft) return { kind: 'message', text: message || draft.text, state, draft: draft.draft, chips: suggestions, engine: 'agent', trace };
+    if (avail && !search) return { kind: 'message', text: message || avail.text, state, availability: avail.availability, chips: suggestions, engine: 'agent', trace };
+    // 검색과 상세를 한 턴에 같이 했으면 결과 표를 잃지 않게 result로 돌려주고 상세는 탭으로 붙여요
+    if (detail && !search) return { kind: 'detail', text: message || detail.text, state, detail: detail.detail, chips: suggestions, engine: 'agent', trace };
+    if (search) {
+      return {
+        kind: 'result',
+        text: estimateNote(state, search.rows, message || resultText(search.total, search.rows.length, search.unknownCount, search.mustOk)),
+        state,
+        understood: describe(state),
+        stages: search.stages,
+        columns: search.columns,
+        rows: search.rows,
+        total: search.total,
+        dropped: search.dropped,
+        relax,
+        availability: avail?.availability,
+        detail: detail?.detail,
+        extras,
+        chips: suggestions.length ? suggestions : relax.length ? relax.slice(0, 3).map((r) => r.label) : chipsFor(state, search.rows, relax.length),
+        engine: 'agent',
+        trace,
+      };
+    }
+    return { kind: 'message', text: message || '원하는 조건을 말씀해 주세요.', state, chips: suggestions, engine: 'agent', trace };
+  }
+}
