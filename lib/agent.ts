@@ -574,6 +574,9 @@ export { chipsFor };
 
 export async function runAgent(text: string, prevIn: AgentState, places?: Places, profile?: Profile): Promise<AgentReply> {
   const reply = await runAgentInner(text, applyProfile(prevIn, profile), places);
+  // 상세를 보여 줬으면 그곳을 "지금 이야기 중인 캠핑장"으로 기억하고, 새 검색 결과가 나오면 잊어요
+  if (reply.detail) reply.state = { ...reply.state, focusId: reply.detail.id };
+  else if (reply.kind === 'result' && reply.state.focusId) reply.state = { ...reply.state, focusId: undefined };
   let chips = filterChips(reply.chips, reply.state);
   // 결과에 자동 확인 가능한 곳이 있으면 "확인 가능한 곳만 빈자리 확인" 버튼을 맨 앞에 둬요
   if (reply.rows?.some((r) => r.liveCheck) && !chips.includes(LIVE_ALL)) {
@@ -598,23 +601,13 @@ export async function runAgent(text: string, prevIn: AgentState, places?: Places
   return { ...reply, chips };
 }
 
-const DETAIL_RE = /^\s*(\d+)\s*번\s*(자세히\s*(보기|봐\s*줘|보여\s*줘)?|상세(\s*보기)?)\s*$/;
+// 버튼이 보내는 고정 문장만 코드로 바로 처리해요. 사람이 직접 쓴 말은 모두 에이전트(Gemini)가 판단해요.
+const DETAIL_RE = /^(\d+)번 자세히 보기$/;
 
-const SIMILAR_RE = /^\s*(.+?)\s*(?:과|와|이랑|랑|하고)?\s*비슷한\s*(?:곳|캠핑장|데|숙소|야영장)/;
+// 상세의 "비슷한 곳 찾기" 버튼이 보내는 문장: "이름 (시군)과 비슷한 곳 찾아줘"
+const SIMILAR_RE = /^(.+ \([^)]+\))(?:과|와) 비슷한 곳 찾아줘$/;
 
-/** "라라플레이스&글램핑 정보 알려줘"처럼 캠핑장 이름으로 상세를 물을 때 */
-const INFO_RE = /(정보|상세|자세히|어때|어떤\s*곳|알려|소개|보여|궁금|뭐야|어디야)/;
-const NOT_INFO_RE = /찾아|추천|같은\s*곳|비슷|말고|근처/;
 const norm = (x: string) => x.replace(/\(주\)|주식회사/g, '').toLowerCase().replace(/[\s&·.,()\[\]'"!?~\-_/]/g, '');
-function campsByName(text: string): Camp[] {
-  if (!INFO_RE.test(text) || NOT_INFO_RE.test(text)) return [];
-  // "○○캠핑장 (가평군) 정보 알려줘"처럼 괄호에 시·군이 있으면 그 지역으로 좁혀요
-  const area = text.match(/\(([^)]+)\)/)?.[1]?.trim();
-  if (area) text = text.replace(/\([^)]*\)/, ' ');
-  const cut = text.search(/(에\s*대한|에\s*대해|에\s*관한|정보|상세|자세히|어때|어떤\s*곳|알려|소개|보여|궁금|뭐야|어디야)/);
-  const target = norm((cut > 0 ? text.slice(0, cut) : text).replace(/(의|은|는|이|가|을|를)\s*$/, ''));
-  return lookupCampsByName(target, area);
-}
 
 /** 이름으로 캠핑장 찾기 (띄어쓰기·기호 무시). 정확히 같은 이름이 있으면 그것만, 없으면 이름에 포함되는 곳들 */
 export function lookupCampsByName(name: string, area?: string): Camp[] {
@@ -690,7 +683,7 @@ async function runAgentInner(text: string, prevIn: AgentState, places?: Places):
   // "다올숲과 비슷한 곳 찾아줘": 기준 캠핑장 특징으로 조건을 만들어 근처에서 찾아요
   const sim = SIMILAR_RE.exec(text);
   if (sim) {
-    const found = lookupCampsByName(sim[1].replace(/(과|와|이랑|랑|하고)$/, ''));
+    const found = lookupCampsByName(sim[1]);
     if (found.length === 1) {
       const camp = found[0];
       const { state, basis } = similarState(camp, prev);
@@ -706,32 +699,6 @@ async function runAgentInner(text: string, prevIn: AgentState, places?: Places):
         chips: found.map((c) => `${c.facltNm} (${c.sigunguNm})${josaWa(c.facltNm)} 비슷한 곳 찾아줘`),
         engine: 'agent',
       };
-  }
-  // 캠핑장 이름으로 정보를 물으면 직전 결과에 없어도 그곳 상세를 보여 줘요
-  const named = campsByName(text);
-  if (named.length === 1) {
-    const camp = named[0];
-    const rank = (prev.lastIds ?? []).indexOf(camp.contentId) + 1;
-    const d = rank > 0 ? await detailWithPlace(prev, rank) : await detailWithPlace({ ...prev, lastIds: [camp.contentId] }, 1);
-    if (d)
-      return {
-        kind: 'detail',
-        text: rank > 0 ? d.text : d.text.replace(/^1번 /, ''),
-        state: prev,
-        detail: d.detail,
-        // 결과 표에 없는 곳이면 "1번 빈자리 확인" 같은 번호 버튼은 다른 곳을 가리켜서 빼요
-        chips: rank > 0 ? d.chips : d.chips.filter((c) => !/^\d+번/.test(c) && (prev.lastIds?.length || c !== '결과 목록 다시 보기')),
-        engine: 'agent',
-        trace: [{ tool: 'get_camp_detail', label: '상세 정보', reason: `"${camp.facltNm}" 이름으로 찾아서 상세를 열었어요` }],
-      };
-  } else if (named.length > 1 && named.length <= 6) {
-    return {
-      kind: 'message',
-      text: `이름이 비슷한 곳이 ${named.length}곳 있어요. 어느 곳을 볼까요?`,
-      state: prev,
-      chips: named.map((c) => `${c.facltNm} (${c.sigunguNm}) 정보 알려줘`),
-      engine: 'agent',
-    };
   }
   const { runAgentLoop } = await import('./agent-loop');
   const looped = await runAgentLoop(text, prev, places);

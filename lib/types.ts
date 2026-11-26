@@ -35,6 +35,7 @@ export interface AgentState {
   lastIds?: string[]; // 직전 결과의 contentId (1번, 2번 참조용)
   excludeIds?: string[]; // 결과에서 뺄 곳 (비슷한 곳 찾기의 기준 캠핑장)
   similarTo?: string; // 비슷한 곳 찾기의 기준 캠핑장 이름
+  focusId?: string; // 방금 상세를 본 캠핑장 ("반려동물 가능해?" 같은 후속 질문의 대상)
   pendingAvailability?: number; // 빈자리 확인 중 날짜를 물어본 숙소 번호 (다음 답이 날짜면 이어서 확인)
 }
 
