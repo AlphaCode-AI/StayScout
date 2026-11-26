@@ -263,11 +263,15 @@ export function ResultTable({
                 {r.place?.renamed && <span className="mt-0.5 block text-xs text-amber-700">카카오맵 이름: {r.place.name}</span>}
                 <ReserveNote r={r} />
               </button>
-              {r.reserve.url && (
-                <a href={r.reserve.url} target="_blank" rel="noreferrer" className="shrink-0 text-xs font-medium text-brand-700">
-                  예약 ↗
-                </a>
-              )}
+              <span className="flex shrink-0 flex-col items-end gap-0.5">
+                {r.reserve.url && (
+                  <a href={r.reserve.url} target="_blank" rel="noreferrer" className="text-xs font-medium text-brand-700">
+                    {['홈페이지', '블로그', '인스타그램'].includes(r.reserve.mode) ? r.reserve.mode : '예약'} ↗
+                  </a>
+                )}
+                {r.google?.rating ? <span className="text-[11px] text-stone-500">구글 ★ {r.google.rating} ({r.google.reviews ?? 0})</span> : null}
+                {r.pending && <span className="animate-pulse text-[11px] text-stone-400">링크 찾는 중…</span>}
+              </span>
             </div>
             <dl className="mt-2 space-y-1.5">
               {mainCols.map((c) => (
@@ -389,6 +393,12 @@ export function ResultTable({
                   ) : (
                     <span className="text-stone-500">{r.reserve.mode}</span>
                   )}
+                  {r.google?.rating ? (
+                    <a href={r.google.mapsUrl} target="_blank" rel="noreferrer" className="mt-0.5 block text-[11px] text-stone-500 hover:text-brand-700" title="구글에 등록된 평점">
+                      구글 ★ {r.google.rating} ({r.google.reviews ?? 0})
+                    </a>
+                  ) : null}
+                  {r.pending && <span className="mt-0.5 block animate-pulse text-[11px] text-stone-400">링크·평점 찾는 중…</span>}
                   <ReserveNote r={r} />
                 </td>
               </tr>

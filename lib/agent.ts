@@ -1,10 +1,12 @@
-import { ORIGINS, PROVINCES, estimateMinutes, evalCond, loadCamps, licenseClosed, loadPetInfo, noKidsQuote, originCoords, siteMix, type Camp } from './data';
+import { CATEGORY_LABEL, SLOT_LABEL, ORIGINS, PROVINCES, categoryOf, estimateMinutes, evalCond, loadCamps, licenseClosed, loadPetInfo, maxPeople, minPrice, noKidsQuote, originCoords, siteMix, type Camp } from './data';
 import { canCheckLive, checkAvailability, type Availability } from './availability';
 import { EXAMPLES } from './examples';
 import { kakaoExtras, placeNow } from './kakao';
+import { googlePlace } from './google';
+import { naverPlace } from './naver';
 import { linkAlive, naverSearch, phoneLooksValid, toUrl } from './links';
 import { applyPlaces, interpret } from './interpret';
-import { parse } from './parse';
+import { normalizeCategory, parse } from './parse';
 import { applyProfile, type Profile } from './profile';
 import type { AgentReply, AgentState, Column, DetailCard, Dropped, Places, Relax, Row, Stage } from './types';
 
@@ -40,7 +42,10 @@ interface Ctx {
 /** 조건 묶음으로 후보를 거르고, 단계별 남은 수를 기록해요. */
 function pipeline(camps: Camp[], ctx: Ctx, override?: Partial<AgentState>) {
   const s = { ...ctx.state, ...override } as AgentState;
-  const stages: Stage[] = [{ label: '전국 등록 캠핑장', count: camps.length }];
+  // 캠핑장과 펜션·민박은 같은 목록에 있어서 지금 찾는 종류만 남겨요
+  const cat = s.category ?? 'camp';
+  camps = camps.filter((c) => categoryOf(c) === cat);
+  const stages: Stage[] = [{ label: `전국 ${cat === 'pension' ? '펜션·민박 (인허가·관광공사)' : '등록 캠핑장'}`, count: camps.length }];
   // 단계마다 남은 곳을 기억해 두면, 이전 결과에 있던 곳이 어느 조건에서 빠졌는지 알 수 있어요.
   const sets: { label: string; ids: Set<string> }[] = [];
   const mark = () => sets.push({ label: stages[stages.length - 1].label, ids: new Set(pool.map((c) => c.contentId)) });
@@ -214,6 +219,7 @@ function petLabel(s: AgentState) {
 
 function describe(s: AgentState) {
   const u: AgentReply['understood'] = [];
+  if (s.category === 'pension') u.push({ label: CATEGORY_LABEL.pension, tone: 'info' });
   if (s.dateLabel) u.push({ label: `${s.dateLabel}${s.season ? ` · ${s.season}` : ''}`, tone: 'info' });
   if (s.people) u.push({ label: `${s.people}명`, tone: 'info' });
   if (s.pet) u.push({ label: petLabel(s), tone: 'must' });
@@ -268,12 +274,47 @@ async function campImages(c: Camp): Promise<string[]> {
 }
 
 /** 상위 몇 곳을 카카오맵과 맞춰 지금 이름·전화를 붙여요. 실패하면 그대로 둬요. */
+/** 결과를 먼저 보여 주고, 상위 10곳의 링크·평점·카카오맵 정보는 화면이 /api/enrich로 뒤에 채워요 */
+export function markPending(rows: Row[]) {
+  for (const r of rows.slice(0, 10)) r.pending = true;
+  return rows;
+}
+
+/** /api/enrich: 상위 곳들의 카카오맵·구글·네이버 정보와 링크 확인 결과 */
+export async function enrichRows(items: { id: string; url?: string; mode?: string }[]) {
+  const rows = items.slice(0, 10).map((x, i) => ({ id: x.id, rank: i + 1, reserve: { mode: x.mode ?? '', url: x.url } }) as unknown as Row);
+  await attachPlaces(rows);
+  return rows.map((r) => ({ id: r.id, place: r.place, google: r.google, naver: r.naver, reserve: r.reserve }));
+}
+
 export async function attachPlaces(rows: Row[], n = 5) {
   const camps = loadCamps().camps;
+  // 펜션은 홈페이지가 거의 없어서 상위 10곳은 구글에 등록된 홈페이지·평점을 찾아 붙여요
+  await Promise.all(
+    rows.slice(0, 10).map(async (r) => {
+      const c = camps.find((x) => x.contentId === r.id);
+      if (c?.kind !== 'pension') return;
+      const g = await googlePlace(c);
+      if (g) r.google = { website: g.website, rating: g.rating, reviews: g.reviews, phone: g.phone, mapsUrl: g.mapsUrl };
+      if (!r.reserve.url && g?.website) {
+        r.reserve.url = g.website;
+        r.reserve.mode = '홈페이지';
+      }
+      // 구글에도 링크가 없으면 네이버에 등록된 링크(홈페이지·블로그·인스타그램·예약)를 찾아요
+      if (!r.reserve.url) {
+        const n = await naverPlace(c);
+        if (n) r.naver = { link: n.link, linkKind: n.linkKind, phone: n.phone };
+        if (n?.link) {
+          r.reserve.url = n.link;
+          r.reserve.mode = n.linkKind || '홈페이지';
+        }
+      }
+    }),
+  );
   await Promise.all(
     rows.slice(0, n).map(async (r) => {
       const c = camps.find((x) => x.contentId === r.id);
-      const [p, alive] = await Promise.all([c ? placeNow(c) : null, linkAlive(r.reserve.url)]);
+      const [p, alive] = await Promise.all([c && c.kind !== 'pension' ? placeNow(c) : null, linkAlive(r.reserve.url)]);
       if (p) r.place = p;
       if (alive === false) r.reserve.dead = true;
     })
@@ -286,12 +327,29 @@ export async function detailWithPlace(state: AgentState, index: number) {
   const d = detailOf(state, index);
   const camp = campByRank(state, index);
   if (!d || !camp) return d;
+  // 펜션: 구글에 등록된 홈페이지·평점·전화를 붙여요 (카카오 장소 대조는 캠핑장용)
+  if (camp.kind === 'pension') {
+    const g = await googlePlace(camp);
+    if (g) {
+      if (g.website && !d.detail.links.some((l) => toUrl(l.url) === toUrl(g.website))) d.detail.links.unshift({ label: '홈페이지 (구글 등록)', url: g.website });
+      if (g.mapsUrl) d.detail.links.push({ label: '구글 지도', url: g.mapsUrl });
+      if (g.rating) d.detail.facts.push({ label: '구글 평점', value: `★ ${g.rating} (리뷰 ${g.reviews ?? 0}개)` });
+      const tel = d.detail.facts.find((x) => x.label === '전화');
+      if (tel && tel.value === '-' && g.phone) tel.value = `${g.phone} (구글 등록)`;
+    }
+    if (!g?.website && !d.detail.links.some((l) => /예약|홈페이지/.test(l.label))) {
+      const n = await naverPlace(camp);
+      if (n?.link) d.detail.links.unshift({ label: `${n.linkKind || '홈페이지'} (네이버 등록)`, url: n.link });
+      const tel = d.detail.facts.find((x) => x.label === '전화');
+      if (tel && tel.value === '-' && n?.phone) tel.value = `${n.phone} (네이버 등록)`;
+    }
+  }
   const [p, alive, images] = await Promise.all([
-    placeNow(camp),
+    camp.kind === 'pension' ? null : placeNow(camp),
     Promise.all(d.detail.links.map((l) => (/gocamping|kakao/.test(l.url) ? Promise.resolve(true) : linkAlive(l.url)))),
     campImages(camp),
   ]);
-  if (images.length) d.detail.images = [...new Set([camp.firstImageUrl, ...images].filter((x): x is string => !!x))].slice(0, 12);
+  if (images.length && camp.kind !== 'pension') d.detail.images = [...new Set([camp.firstImageUrl, ...images].filter((x): x is string => !!x))].slice(0, 12);
   const dead = d.detail.links.filter((_, i) => alive[i] === false);
   for (const l of dead) l.label += ' (열리지 않음)';
   const f = freshness(camp);
@@ -321,9 +379,70 @@ export async function detailWithPlace(state: AgentState, index: number) {
   return d;
 }
 
+function pensionDetail(camp: Camp, index: number): { text: string; detail: DetailCard; chips: string[] } {
+  const won = (n?: number) => (n ? `${(n / 10000).toFixed(n % 10000 ? 1 : 0)}만 원` : '');
+  const rooms = camp.rooms ?? [];
+  const intro = (camp.intro || '').replace(/\s+/g, ' ');
+  const facts = [
+    { label: '유형', value: `${camp.tourPension ? '관광펜션 (관광펜션업 지정)' : camp.pensionType || '펜션'}${camp.induty === '농어촌민박' ? ' · 농어촌민박 신고' : ''}` },
+    ...(camp.roomCount || camp.roomType ? [{ label: '객실', value: [camp.roomCount && `${camp.roomCount}개`, camp.roomType].filter(Boolean).join(' · ') }] : []),
+    ...(rooms.length
+      ? [
+          {
+            label: '객실 정보',
+            value: rooms
+              .slice(0, 6)
+              .map((r) => `${r.name}${r.max ? ` (기준 ${r.base ?? '-'}·최대 ${r.max}명)` : ''}${r.prices?.offWeekday || r.price ? ` ${won(r.prices?.offWeekday || r.price)}~` : ''}`)
+              .join(' / '),
+          },
+        ]
+      : []),
+    ...(maxPeople(camp) ? [{ label: '최대 인원', value: `${maxPeople(camp)}명 (가장 큰 객실)` }] : []),
+    ...(minPrice(camp)
+      ? [
+          {
+            label: '가격 (최저)',
+            value:
+              (['offWeekday', 'offWeekend', 'peakWeekday', 'peakWeekend'] as const)
+                .map((k) => minPrice(camp, k) && `${SLOT_LABEL[k]} ${won(minPrice(camp, k))}`)
+                .filter(Boolean)
+                .join(' · ') + ' (관광공사 등록 기준, 실제와 다를 수 있어요)',
+          },
+        ]
+      : []),
+    ...(camp.cookCl ? [{ label: '취사', value: camp.cookCl }] : []),
+    ...(camp.subfacility ? [{ label: '부대시설', value: camp.subfacility }] : []),
+    ...(camp.checkin || camp.checkout ? [{ label: '입·퇴실', value: `${camp.checkin || '-'} / ${camp.checkout || '-'}` }] : []),
+    ...(camp.parking ? [{ label: '주차', value: camp.parking }] : []),
+    ...(camp.resveCl ? [{ label: '예약', value: camp.resveCl }] : []),
+    ...(camp.permitDate ? [{ label: '인허가', value: `${camp.permitDate} (${camp.tourPension ? '관광펜션업' : '농어촌민박업'}, 행정안전부)` }] : []),
+    { label: '정보 출처', value: camp.tourId ? '행정안전부 인허가 + 한국관광공사 숙박 정보' : `${camp.source || '행정안전부 인허가'} · 기본 정보만 있는 곳` },
+    { label: '전화', value: camp.tel || '-' },
+  ];
+  return {
+    text: `${index}번 ${camp.facltNm} 정보예요. 행정안전부 인허가${camp.tourId ? '와 한국관광공사 숙박 정보' : ''}를 모아서 보여 드려요.`,
+    detail: {
+      id: camp.contentId,
+      name: camp.facltNm,
+      intro: intro.length > 140 ? `${intro.slice(0, 140)}…` : intro,
+      address: camp.addr1,
+      image: camp.firstImageUrl || undefined,
+      images: [camp.firstImageUrl, ...rooms.map((r) => r.image)].filter((x): x is string => !!x).slice(0, 12),
+      facts,
+      links: [
+        toUrl(camp.resveUrl) && { label: '예약 페이지', url: toUrl(camp.resveUrl) },
+        toUrl(camp.homepage) && toUrl(camp.homepage) !== toUrl(camp.resveUrl) && { label: '홈페이지', url: toUrl(camp.homepage) },
+        { label: '카카오맵에서 보기', url: `https://map.kakao.com/?q=${encodeURIComponent(`${camp.facltNm} ${camp.sigunguNm}`)}` },
+      ].filter(Boolean) as { label: string; url: string }[],
+    },
+    chips: [`${index}번 숙소에 문의 메시지 써 줘`, '결과 목록 다시 보기'],
+  };
+}
+
 export function detailOf(state: AgentState, index: number): { text: string; detail: DetailCard; chips: string[] } | null {
   const camp = campByRank(state, index);
   if (!camp) return null;
+  if (camp.kind === 'pension') return pensionDetail(camp, index);
   return {
     text: `${index}번 ${camp.facltNm} 정보예요. 한국관광공사·행정안전부 공공데이터를 모아서 보여 드려요.`,
     detail: {
@@ -476,7 +595,15 @@ export function searchOf(state: AgentState) {
     minutes: minutes.get(c.contentId),
     inRegion: state.regions.length ? inRegion(c, state.regions) : false,
     cells: Object.fromEntries(columns.map((col) => [col.key, evalCond(col.key, c, state.petSize, typesOf(state))])),
-    reserve: { mode: reserveMode(c.resveCl), url: toUrl(c.resveUrl) || toUrl(c.homepage) },
+    reserve: {
+      mode:
+        c.kind === 'pension'
+          ? toUrl(c.resveUrl) || toUrl(c.homepage)
+            ? '홈페이지'
+            : (c.resveCl || '').replace(/^가능\s*\(?/, '').replace(/\)\s*$/, '').split(',').slice(0, 2).join('·') || '정보 없음'
+          : reserveMode(c.resveCl),
+      url: toUrl(c.resveUrl) || toUrl(c.homepage),
+    },
     liveCheck: canCheckLive(c),
     extraSource: c.source,
     ...freshness(c),
@@ -512,6 +639,7 @@ export function searchOf(state: AgentState) {
 
 /** 고캠핑에 없는 같은 지역 캠핑장 (카카오 장소 검색) */
 export function extrasFor(state: AgentState) {
+  if (state.category === 'pension') return Promise.resolve([] as Awaited<ReturnType<typeof kakaoExtras>>);
   return kakaoExtras(state, state.originCoords ?? originCoords(state.origin));
 }
 
@@ -550,7 +678,7 @@ export function estimateNote(state: AgentState, rows: Row[], text: string) {
   const names = judged.map((c) => c.label).join('·');
   const last = names.charCodeAt(names.length - 1);
   const josa = last >= 0xac00 && last <= 0xd7a3 && (last - 0xac00) % 28 ? '은' : '는';
-  return `${text}\n${names}${josa} 사이트 정보와 소개글로 추정했어요.`;
+  return `${text}\n${names}${josa} ${state.category === 'pension' ? '객실 수와 소개글' : '사이트 정보와 소개글'}로 추정했어요.`;
 }
 
 export function resultText(total: number, shown: number, unknownCount: number, mustOk = total) {
@@ -573,7 +701,9 @@ export { chipsFor };
 // ---------------------------------------------------------------------------
 
 export async function runAgent(text: string, prevIn: AgentState, places?: Places, profile?: Profile): Promise<AgentReply> {
-  const reply = await runAgentInner(text, applyProfile(prevIn, profile), places);
+  // 새 대화 첫 말에 "펜션"이 있으면 펜션용 내 정보 조건을 깔아요
+  const guess = prevIn.category ?? (!prevIn.conds.length && /펜션|독채|풀빌라|민박/.test(text) ? 'pension' : undefined);
+  const reply = await runAgentInner(text, applyProfile({ ...prevIn, category: guess }, profile), places);
   // 상세를 보여 줬으면 그곳을 "지금 이야기 중인 캠핑장"으로 기억하고, 새 검색 결과가 나오면 잊어요
   if (reply.detail) reply.state = { ...reply.state, focusId: reply.detail.id };
   else if (reply.kind === 'result' && reply.state.focusId) reply.state = { ...reply.state, focusId: undefined };
@@ -738,7 +868,7 @@ export async function runPipeline(text: string, prev: AgentState, places?: Place
 /** 현재 조건으로 검색해서 결과 답을 만들어요 (기본 파이프라인·비슷한 곳 찾기가 같이 써요) */
 export async function searchReply(state: AgentState, lead = ''): Promise<AgentReply> {
   const r = searchOf(state);
-  await attachPlaces(r.rows);
+  markPending(r.rows);
   const relax = r.total < 3 ? relaxOf(state) : [];
   const extras = await extrasFor(state);
   return {
@@ -765,6 +895,19 @@ export function similarState(camp: Camp, prev: AgentState): { state: AgentState;
   const m = siteMix(camp);
   const conds: AgentState['conds'] = [];
   const basis: string[] = [];
+  if (camp.kind === 'pension') {
+    const has = (key: string) => ['yes', 'likely'].includes(evalCond(key, camp).v);
+    const add = (key: string, label: string, b: string) => {
+      conds.push({ key, label, kind: key.startsWith('judge') ? 'judge' : 'filter', must: false });
+      basis.push(b);
+    };
+    if (has('detached')) add('detached', '독채', '독채');
+    if (has('judge:바비큐')) add('judge:바비큐', '바비큐', '바비큐');
+    if (has('etc:수영장')) add('etc:수영장', '수영장', '수영장');
+    if (has('etc:스파')) add('etc:스파', '스파', '스파');
+    if (has('cook')) add('cook', '객실 취사', '객실 취사');
+    if (camp.roomCount && camp.roomCount <= 3) add('judge:조용함', '조용함', `작은 규모(객실 ${camp.roomCount}개)`);
+  } else {
   if (m.tent) {
     conds.push({ key: 'tent', label: '텐트 사이트', kind: 'filter', must: true });
     basis.push('텐트 사이트');
@@ -794,6 +937,7 @@ export function similarState(camp: Camp, prev: AgentState): { state: AgentState;
     conds.push({ key: 'judge:조용함', label: '조용함', kind: 'judge', must: false });
     basis.push(`작은 규모(${sites}곳)`);
   }
+  }
   const state: AgentState = {
     regions: [],
     conds,
@@ -802,6 +946,7 @@ export function similarState(camp: Camp, prev: AgentState): { state: AgentState;
     maxMinutes: 60,
     excludeIds: [camp.contentId],
     similarTo: camp.facltNm,
+    category: categoryOf(camp),
     // 날짜·인원·반려견은 지금 대화에서 말한 걸 이어 가요
     checkIn: prev.checkIn,
     nights: prev.nights,
@@ -813,6 +958,7 @@ export function similarState(camp: Camp, prev: AgentState): { state: AgentState;
     petKg: prev.petKg,
     kids: prev.kids,
   };
+  state.conds = normalizeCategory(state, state.conds);
   return { state, basis };
 }
 

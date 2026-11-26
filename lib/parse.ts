@@ -2,7 +2,7 @@
  * 규칙 기반 조건 해석기.
  * LLM을 연결하기 전까지 쓰는 임시 버전이에요. 같은 AgentState를 돌려주도록 LLM 해석기로 갈아 끼우면 나머지는 그대로 동작해요.
  */
-import { ORIGINS, PROVINCES, seasonOf } from './data';
+import { SLOT_LABEL, slotOf, ORIGINS, PROVINCES, seasonOf } from './data';
 import type { AgentState, Cond, CondKind } from './types';
 
 interface Rule {
@@ -29,7 +29,7 @@ const RULES: Rule[] = [
   { re: /장작/, key: 'sbrs:장작판매', label: '장작 판매', kind: 'filter' },
   { re: /놀이터/, key: 'sbrs:놀이터', label: '놀이터', kind: 'filter' },
   { re: /물놀이|수영장/, key: 'sbrs:물놀이장', label: '물놀이장', kind: 'filter' },
-  { re: /편의점|매점|마트/, key: 'sbrs:마트.편의점', label: '편의점', kind: 'filter' },
+  { re: /편의점|매점|마트/, key: 'sbrs:마트.편의점', label: '매점·편의점', kind: 'filter' },
   { re: /트램펄린|트렘폴린/, key: 'sbrs:트렘폴린', label: '트램펄린', kind: 'filter' },
   { re: /산책로/, key: 'sbrs:산책로', label: '산책로', kind: 'filter' },
   { re: /파쇄석/, key: 'floor:파쇄석', label: '파쇄석', kind: 'filter' },
@@ -38,6 +38,10 @@ const RULES: Rule[] = [
   { re: /트레일러|캠핑카/, key: 'trailer', label: '트레일러 입장', kind: 'filter' },
   { re: /온라인\s*(실시간)?\s*예약/, key: 'online', label: '온라인 예약', kind: 'filter' },
   { re: /(개인|개별|전용|내부)\s*화장실/, key: 'toilet', label: '개인화장실', kind: 'detail' },
+  { re: /독채|단독\s*(건물|사용)|한\s*팀만/, key: 'detached', label: '독채', kind: 'filter' },
+  { re: /취사|주방|요리\s*(가능|해\s*먹)/, key: 'cook', label: '객실 취사', kind: 'filter' },
+  { re: /관광\s*펜션/, key: 'tourpension', label: '관광펜션 지정', kind: 'filter' },
+  { re: /키즈\s*(펜션|풀빌라|풀|룸|시설)|놀이방|아이\s*(놀거리|놀이\s*시설)/, key: 'kidsfriendly', label: '키즈 시설', kind: 'filter' },
   { re: /난로|히터|난방\s*(기구|기)?\s*(대여|빌려)/, key: 'lend:난방기구', label: '난방기구 대여', kind: 'filter' },
   { re: /텐트\s*(대여|빌려)|장비\s*(대여|없이|빌려)|빈손/, key: 'lend:텐트', label: '텐트 대여', kind: 'filter' },
   { re: /침낭\s*(대여|빌려)/, key: 'lend:침낭', label: '침낭 대여', kind: 'filter' },
@@ -136,6 +140,21 @@ const TYPE_WORDS: Record<string, RegExp> = {
   캠프닉: /캠프닉|당일\s*캠핑/,
   일반야영장: /일반\s*(캠핑|야영)/,
 };
+/** 숙소 종류에 맞게 조건을 정리해요.
+ *  펜션이면 인원·가격을 조건으로 세우고 캠핑 전용 조건(유형·텐트·화로대 등)은 빼요. 캠핑장이면 그 반대예요. */
+const CAMP_ONLY = /^(induty:|tent$|brazier$|trailer$|power|floor:|lend:|plenty:|tarp$|toilet$|program$|forest$|sbrs:|judge:사이트)/;
+const PENSION_ONLY = /^(detached$|cook$|tourpension$|kidsfriendly$|capacity:|price:)/;
+export function normalizeCategory(state: AgentState, conds: Cond[]): Cond[] {
+  if (state.category !== 'pension') return conds.filter((c) => !PENSION_ONLY.test(c.key));
+  const out = conds.filter((c) => !CAMP_ONLY.test(c.key) && !/^(capacity|price):/.test(c.key));
+  if (state.people) out.unshift({ key: `capacity:${state.people}`, label: `${state.people}명 묵을 수 있음`, kind: 'filter', must: true });
+  if (state.maxPrice) {
+    const slot = slotOf(state.checkIn);
+    out.push({ key: `price:${state.maxPrice}${slot ? `:${slot}` : ''}`, label: `1박 ${Math.round(state.maxPrice / 10000)}만 원 이하${slot ? ` (${SLOT_LABEL[slot]})` : ''}`, kind: 'filter', must: true });
+  }
+  return out;
+}
+
 export function switchTypes(conds: Cond[], text: string): Cond[] {
   const said = Object.entries(TYPE_WORDS).filter(([, re]) => re.test(text)).map(([k]) => k);
   if (!said.length) return conds;
@@ -278,6 +297,12 @@ export function parse(text: string, prev: AgentState, regionNames: string[], tod
     }
   }
 
-  state.conds = switchTypes(state.conds, text);
+  // 숙소 종류: 펜션·독채·풀빌라·민박이면 펜션, 캠핑·글램핑·카라반·야영이면 캠핑장
+  if (/펜션|독채|풀빌라|민박/.test(t)) state.category = 'pension';
+  else if (/캠핑|글램핑|카라반|야영|캠프|오토캠/.test(t)) state.category = 'camp';
+  // 가격: "20만 원 이하", "1박 15만원까지"
+  const price = t.match(/(\d+(?:\.\d+)?)\s*만\s*원?\s*(이하|이내|까지|안쪽|밑|아래|미만)/);
+  if (price) state.maxPrice = Math.round(Number(price[1]) * 10000);
+  state.conds = normalizeCategory(state, switchTypes(state.conds, text));
   return { state, commands };
 }

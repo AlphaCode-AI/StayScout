@@ -9,7 +9,8 @@ export interface Profile {
   adults?: number;
   kids?: number;
   petSize?: 'small' | 'big'; // 반려견과 갈 때 크기 (매번 되묻지 않게)
-  prefs?: string[]; // 늘 원하는 조건 (선호로 반영)
+  prefs?: string[]; // 늘 원하는 조건 (캠핑장, 선호로 반영)
+  pensionPrefs?: string[]; // 늘 원하는 조건 (펜션·민박)
 }
 
 /** 내 정보에서 고를 수 있는 조건 */
@@ -40,7 +41,21 @@ export const PROFILE_PREFS: { key: string; label: string; kind: CondKind; group:
   { key: 'nopet', label: '반려동물 없는 곳', kind: 'filter', group: '분위기' },
 ];
 
-/** 새 대화(아직 아무 조건도 없을 때)에 내 정보를 기본값으로 깔아요 */
+/** 펜션·민박에서 고를 수 있는 늘 원하는 조건 */
+export const PENSION_PREFS: { key: string; label: string; kind: CondKind; group: string }[] = [
+  { key: 'detached', label: '독채', kind: 'filter', group: '숙소' },
+  { key: 'tourpension', label: '관광펜션 지정', kind: 'filter', group: '숙소' },
+  { key: 'judge:바비큐', label: '바비큐', kind: 'judge', group: '시설' },
+  { key: 'etc:수영장', label: '수영장', kind: 'filter', group: '시설' },
+  { key: 'etc:스파', label: '스파·자쿠지', kind: 'filter', group: '시설' },
+  { key: 'cook', label: '객실 취사', kind: 'filter', group: '시설' },
+  { key: 'kidsfriendly', label: '키즈 시설', kind: 'filter', group: '시설' },
+  { key: 'judge:조용함', label: '조용함', kind: 'judge', group: '분위기' },
+  { key: 'oceanview', label: '오션뷰', kind: 'filter', group: '분위기' },
+  { key: 'new', label: '새로 연 곳', kind: 'filter', group: '분위기' },
+];
+
+/** 새 대화(아직 아무 조건도 없을 때)에 내 정보를 기본값으로 깔아요. 늘 원하는 조건은 숙소 종류별로 따로예요 */
 export function applyProfile(state: AgentState, p?: Profile): AgentState {
   if (!p) return state;
   const fresh = !state.conds.length && !state.regions.length && !state.lastIds?.length && !state.origin;
@@ -51,8 +66,10 @@ export function applyProfile(state: AgentState, p?: Profile): AgentState {
   const people = (p.adults ?? 0) + (p.kids ?? 0);
   if (people && !next.people) next.people = people;
   if (p.kids && !next.kids) next.kids = true;
-  for (const key of p.prefs ?? []) {
-    const o = PROFILE_PREFS.find((x) => x.key === key);
+  const pension = state.category === 'pension';
+  const list = pension ? PENSION_PREFS : PROFILE_PREFS;
+  for (const key of (pension ? p.pensionPrefs : p.prefs) ?? []) {
+    const o = list.find((x) => x.key === key);
     if (o && !next.conds.some((c) => c.key === key)) next.conds.push({ key, label: o.label, kind: o.kind, must: false, fromProfile: true } as Cond);
   }
   return next;

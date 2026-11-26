@@ -1,6 +1,7 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Verdict, PetSize } from './types';
+import { toUrl } from './links';
 
 export interface Camp {
   contentId: string;
@@ -62,7 +63,48 @@ export interface Camp {
   firstPermit?: string; // 같은 자리(주소)에서 가장 먼저 받은 인허가일 (주인·이름이 바뀐 곳 구별용)
   createdtime?: string; // 관광공사 캠핑장 정보에 처음 등록된 날
   forest?: { name: string; type: string; capacity: string; fee: string; facilities: string; tel: string; homepage: string }; // 자연휴양림 표준데이터
+  // ---- 펜션·민박 (scripts/sync-pension.mjs) ----
+  kind?: 'camp' | 'pension';
+  pensionType?: '펜션' | '민박';
+  tourPension?: boolean; // 관광펜션업 지정
+  roomCount?: number; // 객실 수 (인허가)
+  tourId?: string; // 관광공사 숙박 정보 연결
+  roomType?: string; // 객실 유형 (독채·복층 등)
+  cookCl?: string; // 취사 가능 여부
+  subfacility?: string; // 부대시설 (수영장·바비큐장 등)
+  bbqYn?: boolean;
+  saunaYn?: boolean;
+  campfireYn?: boolean;
+  checkin?: string;
+  checkout?: string;
+  parking?: string;
+  refund?: string;
+  rooms?: { name: string; base?: number; max?: number; size?: number; cook?: boolean; bath?: boolean; bathFacility?: boolean; price?: number; prices?: Partial<Record<PriceSlot, number>>; image?: string }[];
 }
+
+export type Category = 'camp' | 'pension';
+export const CATEGORY_LABEL: Record<Category, string> = { camp: '캠핑장', pension: '펜션·민박' };
+export const categoryOf = (c: Camp): Category => c.kind ?? 'camp';
+/** 펜션 최대 수용 인원 (객실 정보가 있는 곳만) */
+export const maxPeople = (c: Camp) => Math.max(0, ...(c.rooms ?? []).map((r) => r.max ?? 0)) || undefined;
+/** 가격 구분: 관광공사 객실 정보의 비수기·성수기 × 주중·주말 최저가 */
+export type PriceSlot = 'offWeekday' | 'offWeekend' | 'peakWeekday' | 'peakWeekend';
+export const SLOT_LABEL: Record<PriceSlot, string> = { offWeekday: '비수기 주중', offWeekend: '비수기 주말', peakWeekday: '성수기 주중', peakWeekend: '성수기 주말' };
+/** 체크인 날짜로 가격 구분을 정해요. 성수기는 7/15~8/25, 주말은 금·토요일 밤 */
+export function slotOf(checkIn?: string): PriceSlot | undefined {
+  if (!checkIn) return undefined;
+  const d = new Date(`${checkIn}T00:00:00`);
+  if (isNaN(+d)) return undefined;
+  const md = (d.getMonth() + 1) * 100 + d.getDate();
+  const peak = md >= 715 && md <= 825;
+  const weekend = d.getDay() === 5 || d.getDay() === 6;
+  return `${peak ? 'peak' : 'off'}${weekend ? 'Weekend' : 'Weekday'}` as PriceSlot;
+}
+/** 펜션 객실 최저가. 구분을 주면 그 구분 가격, 없으면 비수기 주중 */
+export const minPrice = (c: Camp, slot: PriceSlot = 'offWeekday') => {
+  const ps = (c.rooms ?? []).map((r) => r.prices?.[slot] ?? (slot === 'offWeekday' ? r.price : undefined) ?? 0).filter((x) => x > 0);
+  return ps.length ? Math.min(...ps) : undefined;
+};
 
 /** 행안부 인허가에 같은 이름으로 휴업·폐업·말소 기록만 있는 곳 */
 export function licenseClosed(c: Camp) {
@@ -72,10 +114,22 @@ export function licenseClosed(c: Camp) {
 let cache: { camps: Camp[]; syncedAt: string } | null = null;
 
 /** scripts/sync-gocamping.mjs 로 받아 둔 고캠핑 캐시를 읽어요. */
+let cacheStamp = '';
 export function loadCamps() {
+  // data/ 파일을 다시 받으면(sync) 서버를 재시작하지 않아도 새로 읽어요
+  const stamp = ['camps.json', 'pensions.json'].map((f) => { try { return statSync(join(process.cwd(), 'data', f)).mtimeMs; } catch { return 0; } }).join(':');
+  if (cache && stamp !== cacheStamp) cache = null;
+  cacheStamp = stamp;
   if (!cache) {
     const raw = JSON.parse(readFileSync(join(process.cwd(), 'data', 'camps.json'), 'utf8'));
-    cache = { camps: raw.camps as Camp[], syncedAt: raw.syncedAt as string };
+    const camps = raw.camps as Camp[];
+    // 펜션·민박도 같은 목록에 넣고, 검색할 때 카테고리로 나눠요 (kind: 'pension')
+    const pf = join(process.cwd(), 'data', 'pensions.json');
+    if (existsSync(pf)) {
+      const blank = { lineIntro: '', lctCl: '', homepage: '', resveUrl: '', resveCl: '', operPdCl: '', operDeCl: '', sbrsCl: '', posblFcltyCl: '', themaEnvrnCl: '', animalCmgCl: '', trlerAcmpnyAt: '', caravAcmpnyAt: '', toiletCo: '', siteBottomCl1: '', siteBottomCl2: '', siteBottomCl3: '', siteBottomCl4: '', siteBottomCl5: '', firstImageUrl: '', tel: '' };
+      for (const p of JSON.parse(readFileSync(pf, 'utf8')).pensions as Partial<Camp>[]) camps.push({ ...blank, ...p } as Camp);
+    }
+    cache = { camps, syncedAt: raw.syncedAt as string };
   }
   return cache;
 }
@@ -217,7 +271,9 @@ const FLOOR_FIELD: Record<string, keyof Camp> = {
 
 /** 조건 하나를 캠핑장 하나에 대해 판정해요. 정보가 없으면 unknown(확인 필요). */
 export function evalCond(key: string, camp: Camp, petSize?: PetSize, types: string[] = []): { v: Verdict; text: string } {
-  const [type, arg = ''] = key.split(':');
+  const i = key.indexOf(':');
+  const type = i < 0 ? key : key.slice(0, i);
+  const arg = i < 0 ? '' : key.slice(i + 1);
   const induty = list(camp.induty);
   const sbrs = list(camp.sbrsCl);
   switch (type) {
@@ -259,6 +315,13 @@ export function evalCond(key: string, camp: Camp, petSize?: PetSize, types: stri
       return a === '불가능' ? { v: 'yes', text: '반려동물 동반 불가' } : { v: 'no', text: `반려동물 ${a}` };
     }
     case 'pet': {
+      if (camp.kind === 'pension') {
+        // 펜션은 반려견 항목이 따로 없어서 소개글로만 봐요
+        const no = quote(camp, /(반려|애견|강아지)[^.]{0,12}(불가|금지|안\s*됩|받지\s*않|동반\s*불)/);
+        if (no) return { v: 'no', text: no };
+        const yes = quote(camp, /(반려견|애견|강아지|반려동물)\s*(동반|입실|가능|전용|운동장|놀이터)/);
+        return yes ? { v: 'likely', text: yes } : { v: 'unknown', text: '반려견 정보 없음' };
+      }
       const tour = loadPetInfo()[camp.contentId];
       if (tour) return petFromTour(tour, petSize);
       const a = camp.animalCmgCl;
@@ -279,7 +342,14 @@ export function evalCond(key: string, camp: Camp, petSize?: PetSize, types: stri
         : { v: 'no', text: '불가' };
     case 'online':
       if (!camp.resveCl) return { v: 'unknown', text: '정보 없음' };
-      return camp.resveCl.includes('온라인') ? { v: 'yes', text: '온라인' } : { v: 'no', text: camp.resveCl };
+      if (!camp.resveCl.includes('온라인')) return { v: 'no', text: camp.resveCl };
+      // 온라인 예약으로 등록돼 있어도 예약·홈페이지 링크가 없으면 실제로 어디서 예약하는지 알 수 없어요 (1,757곳 중 256곳)
+      if (!toUrl(camp.resveUrl) && !toUrl(camp.homepage)) {
+        // "캠핏"처럼 예약처 이름만 적힌 경우도 있어요
+        const where = (camp.resveUrl || '').trim();
+        return { v: 'unknown', text: where ? `온라인 예약(${where})으로 등록, 링크 없음` : '온라인 예약으로 등록됐지만 예약 링크 없음' };
+      }
+      return { v: 'yes', text: '온라인 예약 링크 있음' };
     case 'power': {
       // 전력 용량(kW)은 API에 없어요. 전기가 없으면 확실히 불가, 있으면 상세 페이지 확인 필요.
       if (sbrs.length && !sbrs.includes('전기')) return { v: 'no', text: '전기 없음' };
@@ -306,7 +376,10 @@ export function evalCond(key: string, camp: Camp, petSize?: PetSize, types: stri
     }
     case 'etc': {
       // 기타 부대시설(카페·식당·키즈카페 등). 목록에 없으면 소개글에서 찾아봐요
-      if ((camp.sbrsEtc || '').includes(arg) || (arg === '스파' && /스파|자쿠지|사우나|노천탕/.test(camp.sbrsEtc || ''))) return { v: 'yes', text: `시설: ${camp.sbrsEtc}` };
+      const fac = [camp.sbrsEtc, camp.subfacility].filter(Boolean).join(', ');
+      if (fac.includes(arg) || (arg === '스파' && /스파|자쿠지|사우나|노천탕|월풀/.test(fac)) || (arg === '수영장' && /풀장|수영장|온수\s*풀/.test(fac))) return { v: 'yes', text: `시설: ${fac.slice(0, 60)}` };
+      if (arg === '스파' && camp.saunaYn) return { v: 'yes', text: '사우나 있음 (관광공사)' };
+      if (arg === '스파' && camp.rooms?.some((r) => /스파|자쿠지|월풀/.test(r.name || ''))) return { v: 'yes', text: `객실: ${camp.rooms.filter((r) => /스파|자쿠지|월풀/.test(r.name || '')).map((r) => r.name).slice(0, 2).join(', ')}` };
       // 수영장은 "풀장", "온수풀"처럼도 써요. 물놀이장(얕은 물놀이 시설)과는 다른 것으로 봐요
       const q = quote(camp, ETC_WORDS[arg] ?? new RegExp(arg));
       if (q) return { v: 'likely', text: q };
@@ -333,6 +406,7 @@ export function evalCond(key: string, camp: Camp, petSize?: PetSize, types: stri
       const q = quote(camp, /오션\s*뷰|바다\s*(가|이)?\s*(보이|전망|뷰|한눈)|바다\s*조망/);
       if (q) return { v: 'likely', text: q };
       if (list(camp.lctCl).includes('해변')) return { v: 'likely', text: '해변 입지' };
+      if (!camp.lctCl) return { v: 'unknown', text: '전망 정보 없음' };
       return { v: 'no', text: list(camp.lctCl).join('·') || '바다 입지 아님' };
     }
     case 'new': {
@@ -379,6 +453,55 @@ export function evalCond(key: string, camp: Camp, petSize?: PetSize, types: stri
       if (b === '개별') return { v: 'yes', text: '사이트별 화로대 가능' };
       if (b === '불가') return { v: 'no', text: '화로대 불가' };
       return { v: 'no', text: `${b}에서만` };
+    }
+    case 'detached': {
+      // 독채: 객실 유형에 "독채"가 있거나, 인허가 객실 수가 1개
+      if (/독채/.test(camp.roomType || '')) return { v: 'yes', text: `객실 유형: ${camp.roomType}` };
+      const q = quote(camp, /독채|단독\s*(건물|주택|사용)|한\s*팀만|1\s*팀\s*전용/);
+      if (q) return { v: 'likely', text: q };
+      if (camp.roomCount === 1) return { v: 'likely', text: '객실 1개 (인허가)' };
+      if (camp.roomCount && camp.roomCount >= 3) return { v: 'no', text: `객실 ${camp.roomCount}개` };
+      return { v: 'unknown', text: camp.roomCount ? `객실 ${camp.roomCount}개` : '객실 정보 없음' };
+    }
+    case 'cook': {
+      const c = camp.cookCl || '';
+      if (/불가/.test(c)) return { v: 'no', text: `취사 ${c}` };
+      if (/가능/.test(c)) return { v: /일부|단,/.test(c) ? 'likely' : 'yes', text: `취사 ${c}` };
+      if (camp.rooms?.some((r) => r.cook)) return { v: 'yes', text: '객실 안 취사 시설' };
+      const q = quote(camp, /취사\s*(가능|시설)|주방|인덕션|조리\s*도구/);
+      return q ? { v: 'likely', text: q } : { v: 'unknown', text: '취사 정보 없음' };
+    }
+    case 'kidsfriendly': {
+      // 키즈 펜션: 이름·객실·부대시설·소개글에 아이 시설이 있는지
+      const re = /키즈|아이\s*(전용|놀이)|놀이방|볼풀|미끄럼틀|트램(펄|폴)린|유아/;
+      if (re.test(camp.facltNm)) return { v: 'yes', text: `이름: ${camp.facltNm}` };
+      if (re.test(camp.subfacility || '')) return { v: 'yes', text: `부대시설: ${camp.subfacility!.slice(0, 40)}` };
+      const room = camp.rooms?.find((r) => re.test(r.name || ''));
+      if (room) return { v: 'yes', text: `객실: ${room.name}` };
+      const q = quote(camp, re);
+      return q ? { v: 'likely', text: q } : { v: 'unknown', text: '아이 시설 정보 없음' };
+    }
+    case 'tourpension':
+      return camp.tourPension ? { v: 'yes', text: '관광펜션업 지정' } : { v: 'unknown', text: '관광펜션 지정 기록 없음' };
+    case 'capacity': {
+      const need = Number(arg) || 0;
+      const max = maxPeople(camp);
+      if (!max) return { v: 'unknown', text: '객실 인원 정보 없음' };
+      return max >= need ? { v: 'yes', text: `최대 ${max}명 객실` } : { v: 'no', text: `가장 큰 객실 ${max}명` };
+    }
+    case 'price': {
+      // arg: "한도:구분" (예: 250000:peakWeekend). 구분이 없으면 날짜를 모르는 것 → 비수기 주중 기준
+      const [lim, slotArg] = arg.split(':');
+      const limit = Number(lim) || 0;
+      const slot = (slotArg as PriceSlot) || 'offWeekday';
+      const won = (n: number) => `${(n / 10000).toFixed(n % 10000 ? 1 : 0)}만 원`;
+      const p = minPrice(camp, slot);
+      if (p) return { v: p <= limit ? 'yes' : 'no', text: `${SLOT_LABEL[slot]} 최저 ${won(p)}${slotArg ? '' : ' (날짜 미정)'}` };
+      // 그 구분 가격이 없으면 비수기 주중 가격으로 가늠해요. 비수기 주중부터 한도를 넘으면 다른 때도 넘어요
+      const base = minPrice(camp, 'offWeekday');
+      if (!base) return { v: 'unknown', text: '가격 정보 없음' };
+      if (base > limit) return { v: 'no', text: `비수기 주중부터 ${won(base)}` };
+      return { v: 'unknown', text: `비수기 주중 ${won(base)} · ${SLOT_LABEL[slot]} 가격 정보 없음` };
     }
     case 'judge':
       return judge(arg, camp);
@@ -427,6 +550,10 @@ function quote(c: Camp, re: RegExp) {
  * 사용자 눈에는 펜션에 가까우니 유형을 구성 그대로 보여 주고, 텐트 조건에 써요.
  */
 export function siteMix(c: Camp) {
+  if (c.kind === 'pension') {
+    const rooms = c.roomCount ? `객실 ${c.roomCount}개` : '';
+    return { tent: 0, glamp: 0, carav: 0, known: false, roomOnly: false, label: [c.tourPension ? '관광펜션' : c.pensionType || '펜션', rooms].filter(Boolean).join(' · ') };
+  }
   const n = (x?: string) => Number(x || 0) || 0;
   const tent = n(c.gnrlSiteCo) + n(c.autoSiteCo);
   const glamp = n(c.glampSiteCo);
@@ -508,6 +635,15 @@ function spacing(c: Camp): { v: Verdict; text: string } {
 function quiet(c: Camp): { v: Verdict; text: string } {
   const reasons: string[] = [];
   let score = 0;
+  if (c.kind === 'pension') {
+    if (c.roomCount && c.roomCount <= 3) {
+      score++;
+      reasons.push(`객실 ${c.roomCount}개 소규모`);
+    } else if (c.roomCount && c.roomCount >= 10) {
+      score--;
+      reasons.push(`객실 ${c.roomCount}개`);
+    }
+  }
   const sites = siteCount(c);
   if (sites && sites <= 20) {
     score++;
@@ -540,6 +676,12 @@ function quiet(c: Camp): { v: Verdict; text: string } {
  * 4) 화로대 "불가" → 사이트에서 불을 못 피워요 → 아님
  */
 function bbq(c: Camp): { v: Verdict; text: string } {
+  if (c.kind === 'pension') {
+    const own = quote(c, /(개별|객실별|전용|테라스|독립)\s*(바비큐|바베큐|BBQ|그릴)/i);
+    if (own) return { v: 'yes', text: own };
+    if (/바비큐|바베큐/.test(c.subfacility || '')) return { v: 'yes', text: `부대시설: ${c.subfacility!.slice(0, 40)}` };
+    if (c.bbqYn) return { v: 'yes', text: '바비큐 가능 (관광공사)' };
+  }
   const q = quote(c, /(바비큐|바베큐|BBQ|그릴|숯불)/i);
   if (q) return { v: 'likely', text: q };
   const etc = c.sbrsEtc || '';

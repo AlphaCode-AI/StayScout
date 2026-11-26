@@ -1,6 +1,6 @@
 import { PROVINCES, seasonOf } from './data';
 import { interpretWithGemini, type LlmResult } from './llm';
-import { parse, ruleFor, switchTypes, type Command } from './parse';
+import { normalizeCategory, parse, ruleFor, switchTypes, type Command } from './parse';
 import type { AgentState, Cond, Places } from './types';
 
 const DAYS = ['일', '월', '화', '수', '목', '금', '토'];
@@ -29,7 +29,7 @@ function normalizeRegions(names: string[], regionNames: string[]) {
   return [...new Set(out)];
 }
 
-const VALID = /^(induty|lct|sbrs|floor|lend|plenty|etc|thema|near):.+$|^(trailer|online|toilet|power|judge|brazier|tent|program|nokids|tarp|nopet|forest|oceanview|new)$/;
+const VALID = /^(induty|lct|sbrs|floor|lend|plenty|etc|thema|near):.+$|^(trailer|online|toilet|power|judge|brazier|tent|program|nokids|tarp|nopet|forest|oceanview|new|detached|cook|tourpension|kidsfriendly)$/;
 
 /** 모델이 다른 이름으로 준 값을 데이터에 있는 이름으로 맞춰요. 목록에 없으면 null → 판단형 조건으로 */
 const CANON: Record<string, Record<string, string[]>> = {
@@ -66,7 +66,7 @@ function canonical(type: string, value: string) {
   return null;
 }
 
-const LABELS: Record<string, string> = { 무선인터넷: '와이파이', 장작판매: '장작 판매', '마트.편의점': '편의점', 자동차야영장: '오토캠핑', 해변: '바다', 트렘폴린: '트램펄린' };
+const LABELS: Record<string, string> = { 무선인터넷: '와이파이', 장작판매: '장작 판매', '마트.편의점': '매점·편의점', 자동차야영장: '오토캠핑', 해변: '바다', 트렘폴린: '트램펄린' };
 
 function toConds(list: NonNullable<LlmResult['conditions']>): Cond[] {
   const conds: Cond[] = [];
@@ -213,6 +213,8 @@ export function mergeDelta(
     }
   }
   if (llm.people && llm.people > 0) state.people = llm.people;
+  if (llm.category === 'camp' || llm.category === 'pension') state.category = llm.category;
+  if (llm.maxPrice && llm.maxPrice > 0) state.maxPrice = llm.maxPrice;
   if (llm.pet) state.pet = true;
   if (llm.petSize === 'small' || llm.petSize === 'big') {
     state.pet = true;
@@ -267,6 +269,9 @@ export function mergeDelta(
     const powerDup = c.key.startsWith('power') && state.conds.some((x) => x.key.startsWith('power'));
     if (!powerDup && !state.conds.some((x) => x.key === c.key)) state.conds.push(c);
   }
-  state.conds = switchTypes(state.conds, text);
+  // 규칙 해석이 이번 말에서 숙소 종류나 가격을 잡았으면 반영해요 (Gemini가 놓칠 때 대비)
+  if (r.category && r.category !== prev.category && !llm.category) state.category = r.category;
+  if (r.maxPrice && r.maxPrice !== prev.maxPrice && !llm.maxPrice) state.maxPrice = r.maxPrice;
+  state.conds = normalizeCategory(state, switchTypes(state.conds, text));
   return state;
 }

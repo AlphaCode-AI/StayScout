@@ -35,6 +35,8 @@ export interface AgentState {
   lastIds?: string[]; // 직전 결과의 contentId (1번, 2번 참조용)
   excludeIds?: string[]; // 결과에서 뺄 곳 (비슷한 곳 찾기의 기준 캠핑장)
   similarTo?: string; // 비슷한 곳 찾기의 기준 캠핑장 이름
+  category?: 'camp' | 'pension'; // 지금 찾는 숙소 종류 (없으면 캠핑장)
+  maxPrice?: number; // 1박 최대 가격(원). 펜션만
   focusId?: string; // 방금 상세를 본 캠핑장 ("반려동물 가능해?" 같은 후속 질문의 대상)
   pendingAvailability?: number; // 빈자리 확인 중 날짜를 물어본 숙소 번호 (다음 답이 날짜면 이어서 확인)
 }
@@ -69,6 +71,9 @@ export interface Row {
   asOf?: string; // 고캠핑 정보 갱신일 (YYYY-MM)
   stale?: boolean; // 갱신한 지 1년이 넘음 → 예약처·이름이 바뀌었을 수 있음
   place?: { name: string; phone?: string; url: string; renamed: boolean }; // 카카오맵의 지금 정보
+  google?: { website?: string; rating?: number; reviews?: number; phone?: string; mapsUrl?: string }; // 구글에 등록된 정보 (펜션)
+  naver?: { link?: string; linkKind?: string; phone?: string };
+  pending?: boolean; // 링크·평점·카카오맵 정보를 아직 찾는 중 (화면이 /api/enrich로 뒤에 채워요) // 네이버 지역 검색에 등록된 링크 (구글에 홈페이지가 없을 때)
 }
 
 export interface Dropped {

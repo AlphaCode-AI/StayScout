@@ -4,7 +4,7 @@
  * 어떤 도구를 어떤 순서로 부를지 Gemini가 정해요. 실패하면 null → 기본 파이프라인으로 넘어가요.
  */
 import {
-  attachPlaces,
+  markPending,
   availabilityOf,
   chipsFor,
   estimateNote,
@@ -51,7 +51,7 @@ const TOOLS = [
       {
         name: 'search_camps',
         description:
-          '현재 조건으로 공공데이터(전국 등록 캠핑장)에서 캠핑장을 찾아요. 결과 수, 단계별 남은 수, 상위 5곳 요약을 돌려줘요. 결과를 바꾸는 정보가 빠졌으면 need_info와 함께 물어볼 질문과 버튼 문구를 돌려줘요.',
+          '현재 조건으로 공공데이터(캠핑장, 또는 category가 pension이면 펜션·민박)에서 숙소를 찾아요. 결과 수, 단계별 남은 수, 상위 5곳 요약을 돌려줘요. 결과를 바꾸는 정보가 빠졌으면 need_info와 함께 물어볼 질문과 버튼 문구를 돌려줘요.',
         parameters: { type: 'OBJECT', properties: { reason } },
       },
       {
@@ -128,13 +128,16 @@ function systemPrompt(prev: AgentState) {
     regions: prev.regions,
     dateLabel: prev.dateLabel,
     people: prev.people,
+    category: prev.category ?? "camp",
+    maxPrice: prev.maxPrice,
     pet: prev.pet,
     petSize: prev.petSize,
     conditions: prev.conds.map((c) => ({ key: c.key, label: c.label, must: c.must })),
     lastResultCount: prev.lastIds?.length ?? 0,
     방금_본_캠핑장: prev.focusId ? loadCamps().camps.find((c) => c.contentId === prev.focusId)?.facltNm : undefined,
   };
-  return `너는 StayScout, 사용자가 말한 조건에 맞는 "갈 수 있는 캠핑장"을 찾아 주는 에이전트야.
+  return `너는 StayScout, 사용자가 말한 조건에 맞는 "갈 수 있는 숙소"(캠핑장, 펜션·민박)를 찾아 주는 에이전트야.
+지금 찾는 종류: ${prev.category === 'pension' ? '펜션·민박' : '캠핑장'}. 사용자가 펜션·독채·풀빌라·민박을 말하면 update_conditions에 category "pension", 캠핑·글램핑·카라반을 말하면 "camp"를 넣어. 펜션은 객실 인원(people)과 1박 가격(maxPrice)도 조건이 돼. 펜션에는 캠핑 전용 조건(텐트, 화로대, 전기 등)을 넣지 마.
 목표: 사용자의 목표를 이해하고, 도구로 실제 데이터를 확인해서, 근거와 함께 가장 잘 맞는 곳을 제시해.
 
 ${dateContext()}
@@ -190,9 +193,18 @@ const COMMON_CHECKS: [string, string][] = [
   ['lend:난방기구', '난방기구 대여'],
   ['sbrs:놀이터', '놀이터'],
 ];
+const PENSION_CHECKS: [string, string][] = [
+  ['detached', '독채'],
+  ['judge:바비큐', '바비큐'],
+  ['etc:수영장', '수영장'],
+  ['etc:스파', '스파·자쿠지'],
+  ['cook', '객실 취사'],
+  ['judge:조용함', '조용함'],
+  ['tourpension', '관광펜션 지정'],
+];
 function verdictsFor(camp: Camp, state: AgentState) {
   const V = { yes: '확인됨', likely: '추정', no: '아님', unknown: '확인 필요' } as const;
-  const keys = new Map<string, string>(COMMON_CHECKS);
+  const keys = new Map<string, string>(camp.kind === 'pension' ? PENSION_CHECKS : COMMON_CHECKS);
   for (const c of state.conds) keys.set(c.key, c.label);
   const out: Record<string, string> = {};
   if (state.pet) {
@@ -357,7 +369,7 @@ export async function runAgentLoop(text: string, prev: AgentState, places?: Plac
             break;
           }
           search = searchOf(state);
-          await attachPlaces(search.rows);
+          markPending(search.rows);
           extras = await extrasFor(state);
           result = {
             조건_미확인_추가: extras.length ? `${extras.length}곳 (카카오 장소 검색, 시설·반려견 조건 확인 안 됨)` : '없음',
@@ -424,7 +436,7 @@ export async function runAgentLoop(text: string, prev: AgentState, places?: Plac
             state = sim.state;
             updated = true;
             search = searchOf(state);
-            await attachPlaces(search.rows);
+            markPending(search.rows);
             extras = await extrasFor(state);
             result = {
               기준: sim.basis,

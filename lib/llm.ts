@@ -14,6 +14,8 @@ export interface LlmResult {
   checkIn?: string;
   nights?: number;
   people?: number;
+  category?: 'camp' | 'pension';
+  maxPrice?: number;
   pet?: boolean;
   petSize?: 'small' | 'big' | 'unknown';
   conditions?: { key: string; label: string; must: boolean; value?: string }[];
@@ -44,6 +46,7 @@ export const CATALOG = `
 - forest (자연휴양림) | oceanview (바다가 보이는 곳) | new (1년 안에 새로 연 곳)
 - tarp (사이트에 타프·그늘막이 미리 설치된 곳, 타프존)
 - tent (텐트를 칠 수 있는 사이트가 있는 곳. 카라반·글램핑 객실만 있는 곳 제외)
+- [펜션·민박 전용] detached (독채, 한 팀만 쓰는 건물) | cook (객실 안 취사·주방) | tourpension (관광펜션 지정) | kidsfriendly (키즈 펜션: 키즈풀·놀이방 등 아이 시설) | etc:수영장 | etc:스파 (스파·자쿠지·사우나) | judge:바비큐
 - judge (위 목록에 없는 모든 조건. 예: 조용함, 전망, 그늘, 청결, 바비큐, 아이 놀기 좋음, 사이트 간격 넓음 등. label은 짧은 한국어 명사)`;
 
 export const SCHEMA = {
@@ -57,6 +60,8 @@ export const SCHEMA = {
     checkIn: { type: 'STRING' },
     nights: { type: 'INTEGER' },
     people: { type: 'INTEGER' },
+    category: { type: 'STRING', enum: ['camp', 'pension'], description: '캠핑·글램핑·카라반이면 camp, 펜션·독채·풀빌라·민박이면 pension. 사용자가 말했을 때만' },
+    maxPrice: { type: 'INTEGER', description: '1박 최대 가격(원). "20만 원 이하"면 200000' },
     pet: { type: 'BOOLEAN' },
     petSize: { type: 'STRING', enum: ['small', 'big', 'unknown'] },
     removeKeys: { type: 'ARRAY', items: { type: 'STRING' } },

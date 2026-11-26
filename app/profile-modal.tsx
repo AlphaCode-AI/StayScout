@@ -1,12 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { PROFILE_PREFS, type Profile } from '@/lib/profile';
+import { PENSION_PREFS, PROFILE_PREFS, type Profile } from '@/lib/profile';
 import type { Home } from './history';
 
 // 함께 둘 수 없는 조건: 숙소 유형은 하나만, 아이와 함께면 노키즈존, 반려견과 함께면 "반려동물 없는 곳"은 못 골라요
 const SINGLE_GROUPS = ['숙소 유형'];
-const GROUPS = [...new Set(PROFILE_PREFS.map((x) => x.group))];
+const groupsOf = (list: typeof PROFILE_PREFS) => [...new Set(list.map((x) => x.group))];
 
 /** 내 정보: 우리 집, 같이 가는 인원, 반려견 크기, 늘 원하는 조건. 이 브라우저에만 저장돼요. */
 export function ProfileModal({
@@ -16,7 +16,9 @@ export function ProfileModal({
   onEditHome,
   onClearHome,
   onClose,
+  initialCat = 'camp',
 }: {
+  initialCat?: 'camp' | 'pension';
   profile: Profile | null;
   home: Home | null;
   onSave: (p: Profile | null) => void;
@@ -25,9 +27,16 @@ export function ProfileModal({
   onClose: () => void;
 }) {
   const [p, setP] = useState<Profile>(profile ?? {});
-  const [group, setGroup] = useState(GROUPS[0]);
+  // 늘 원하는 조건은 숙소 종류별로 따로 저장해요
+  // 지금 보고 있는 카테고리(캠핑장·펜션) 탭으로 열어요
+  const [cat, setCat] = useState<'camp' | 'pension'>(initialCat);
+  const LIST = cat === 'camp' ? PROFILE_PREFS : PENSION_PREFS;
+  const field = cat === 'camp' ? 'prefs' : 'pensionPrefs';
+  const GROUPS = groupsOf(LIST);
+  const [groupPick, setGroup] = useState(GROUPS[0]);
+  const group = GROUPS.includes(groupPick) ? groupPick : GROUPS[0];
   const [tip, setTip] = useState<string | null>(null); // 휴대폰에서 막힌 조건을 눌렀을 때 이유를 보여 줘요
-  const prefs = p.prefs ?? [];
+  const prefs = p[field] ?? [];
   const blocked = (key: string) =>
     key === 'nokids' && (p.kids ?? 0) > 0
       ? '아이 인원이 있어서 고를 수 없어요. 아이를 0명으로 바꾸면 고를 수 있어요.'
@@ -36,13 +45,13 @@ export function ProfileModal({
         : '';
   const toggle = (key: string) =>
     setP((v) => {
-      const cur = v.prefs ?? [];
-      if (cur.includes(key)) return { ...v, prefs: cur.filter((k) => k !== key) };
-      const g = PROFILE_PREFS.find((x) => x.key === key)?.group;
-      const keep = cur.filter((k) => !(g && SINGLE_GROUPS.includes(g) && PROFILE_PREFS.find((x) => x.key === k)?.group === g));
-      return { ...v, prefs: [...keep, key] };
+      const cur = v[field] ?? [];
+      if (cur.includes(key)) return { ...v, [field]: cur.filter((k) => k !== key) };
+      const g = LIST.find((x) => x.key === key)?.group;
+      const keep = cur.filter((k) => !(g && SINGLE_GROUPS.includes(g) && LIST.find((x) => x.key === k)?.group === g));
+      return { ...v, [field]: [...keep, key] };
     });
-  const countIn = (g: string) => prefs.filter((k) => PROFILE_PREFS.find((x) => x.key === k)?.group === g).length;
+  const countIn = (g: string) => prefs.filter((k) => LIST.find((x) => x.key === k)?.group === g).length;
 
   const Stepper = ({ label, value, onChange }: { label: string; value?: number; onChange: (n: number) => void }) => (
     <div className="flex items-center justify-between">
@@ -140,10 +149,28 @@ export function ProfileModal({
               <p className="text-sm font-semibold text-stone-800">늘 원하는 조건</p>
               <p className="text-xs text-stone-500">선호로 반영돼요 (안 맞아도 빠지지 않아요)</p>
             </div>
+            <div className="mb-3 inline-flex rounded-lg bg-stone-100 p-1 text-xs">
+              {(['camp', 'pension'] as const).map((k) => {
+                const n = (k === 'camp' ? p.prefs : p.pensionPrefs)?.length ?? 0;
+                return (
+                  <button
+                    key={k}
+                    onClick={() => {
+                      setCat(k);
+                      setTip(null);
+                    }}
+                    className={`rounded-md px-3 py-1 ${cat === k ? 'bg-white font-medium text-stone-900 shadow-sm' : 'text-stone-500 hover:text-stone-800'}`}
+                  >
+                    {k === 'camp' ? '캠핑장' : '펜션·민박'}
+                    {n > 0 && <span className="ml-1 text-brand-600">{n}</span>}
+                  </button>
+                );
+              })}
+            </div>
             {prefs.length > 0 && (
               <div className="mb-3 flex flex-wrap gap-1.5">
                 {prefs.map((k) => {
-                  const o = PROFILE_PREFS.find((x) => x.key === k);
+                  const o = LIST.find((x) => x.key === k);
                   if (!o) return null;
                   return (
                     <button
@@ -180,7 +207,7 @@ export function ProfileModal({
               <div className="p-3">
                 {SINGLE_GROUPS.includes(group) && <p className="mb-2 text-xs text-stone-500">하나만 고를 수 있어요</p>}
                 <div className="flex flex-wrap gap-1.5">
-                  {PROFILE_PREFS.filter((x) => x.group === group).map((o) => {
+                  {LIST.filter((x) => x.group === group).map((o) => {
                     const on = prefs.includes(o.key);
                     const why = blocked(o.key);
                     return (
@@ -238,15 +265,33 @@ export function ProfileModal({
 }
 
 /** 첫 화면·입력창 위에 보여 줄 한 줄 요약 */
-export function profileSummary(p: Profile | null) {
+/** 상단 요약용: 기본 정보와 카테고리별 늘 원하는 조건을 따로 */
+export function profileRows(p: Profile | null) {
+  if (!p) return { base: '', camp: '', pension: '' };
+  const base: string[] = [];
+  const n = (p.adults ?? 0) + (p.kids ?? 0);
+  if (n) base.push(p.kids ? `어른 ${p.adults ?? 0} · 아이 ${p.kids}` : `어른 ${n}`);
+  if (p.petSize) base.push(p.petSize === 'small' ? '소형견' : '중·대형견');
+  const camp = (p.prefs ?? []).map((k) => PROFILE_PREFS.find((x) => x.key === k)?.label).filter(Boolean);
+  const pen = (p.pensionPrefs ?? []).map((k) => PENSION_PREFS.find((x) => x.key === k)?.label).filter(Boolean);
+  return { base: base.join(' · '), camp: camp.join(' · '), pension: pen.join(' · ') };
+}
+
+/** cat을 주면 그 카테고리의 늘 원하는 조건만, 없으면 둘 다 보여 줘요 */
+export function profileSummary(p: Profile | null, cat?: 'camp' | 'pension') {
   if (!p) return '';
   const parts: string[] = [];
   const n = (p.adults ?? 0) + (p.kids ?? 0);
-  if (n) parts.push(p.kids ? `어른 ${p.adults ?? 0} · 아이 ${p.kids}` : `${n}명`);
+  if (n) parts.push(p.kids ? `어른 ${p.adults ?? 0} · 아이 ${p.kids}` : `어른 ${n}`);
   if (p.petSize) parts.push(p.petSize === 'small' ? '소형견' : '중·대형견');
-  for (const k of p.prefs ?? []) {
-    const o = PROFILE_PREFS.find((x) => x.key === k);
-    if (o) parts.push(o.label);
+  // 카테고리를 정하지 않으면(상단 요약) 어느 카테고리 조건인지 이름을 붙여요
+  if (cat !== 'pension') {
+    const camp = (p.prefs ?? []).map((k) => PROFILE_PREFS.find((x) => x.key === k)?.label).filter(Boolean);
+    if (camp.length) parts.push(cat ? camp.join(' · ') : `캠핑: ${camp.join('·')}`);
+  }
+  if (cat !== 'camp') {
+    const pen = (p.pensionPrefs ?? []).map((k) => PENSION_PREFS.find((x) => x.key === k)?.label).filter(Boolean);
+    if (pen.length) parts.push(cat ? pen.join(' · ') : `펜션: ${pen.join('·')}`);
   }
   return parts.join(' · ');
 }

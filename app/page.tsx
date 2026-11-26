@@ -1,20 +1,19 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { EXAMPLE_GROUPS } from '@/lib/examples';
-import type { AgentReply, AgentState, Places } from '@/lib/types';
+import { EXAMPLE_GROUPS, PENSION_EXAMPLE_GROUPS } from '@/lib/examples';
+import type { AgentReply, AgentState, Places, Row } from '@/lib/types';
 import { AvailabilityCard, Chips, DraftCard, Progress, RelaxCard, Trace, Understood } from './components';
 import { ResultPanel, type PanelTab } from './result-panel';
 import { loadConversations, loadHome, loadProfile, saveProfile, relativeTime, saveConversations, saveHome, summarize, type Conversation, type Home as HomeT, type Msg } from './history';
 import { HomeModal } from './home-modal';
-import { ProfileModal, profileSummary } from './profile-modal';
+import { ProfileModal, profileRows, profileSummary } from './profile-modal';
 import type { Profile } from '@/lib/profile';
 
-const CATEGORIES = [
-  { name: '캠핑장', ready: true },
-  { name: '펜션', ready: false },
-  { name: '호텔·모텔', ready: false },
-  { name: '민박', ready: false },
+const CATEGORIES: { name: string; key?: 'camp' | 'pension' }[] = [
+  { name: '캠핑장', key: 'camp' },
+  { name: '펜션·민박', key: 'pension' },
+  { name: '호텔·모텔' },
 ];
 
 const EMPTY: AgentState = { regions: [], conds: [] };
@@ -127,8 +126,16 @@ function HistoryPanel({
                 className={`w-full rounded-lg px-2.5 py-2 pr-8 text-left transition ${c.id === currentId ? 'bg-brand-50 ring-1 ring-brand-100' : 'hover:bg-stone-100'}`}
               >
                 <p className={`truncate text-sm ${c.id === currentId ? 'font-medium text-brand-700' : 'text-stone-800'}`}>{c.title}</p>
-                <p className="mt-0.5 flex justify-between gap-2 text-[11px] text-stone-500">
-                  <span className="truncate">{c.summary || '대화 중'}</span>
+                <p className="mt-0.5 flex items-center justify-between gap-2 text-[11px] text-stone-500">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    {/* 어떤 숙소를 찾던 대화인지 */}
+                    <span
+                      className={`shrink-0 rounded px-1.5 py-px text-[10px] font-medium ${c.state?.category === 'pension' ? 'bg-amber-100 text-amber-800' : 'bg-brand-50 text-brand-700'}`}
+                    >
+                      {c.state?.category === 'pension' ? '펜션' : '캠핑'}
+                    </span>
+                    <span className="truncate">{c.summary || '대화 중'}</span>
+                  </span>
                   <span className="shrink-0">{relativeTime(c.updatedAt)}</span>
                 </p>
               </button>
@@ -154,6 +161,8 @@ export default function Home() {
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [exampleTab, setExampleTab] = useState(0); // 첫 화면 예시: 오토캠핑·글램핑·카라반 중 보고 있는 탭
+  // 지금 찾는 숙소 종류: 대화 조건에 있으면 그걸, 없으면 상단 탭에서 고른 것
+  const [pickedCat, setPickedCat] = useState<'camp' | 'pension'>('camp');
   // 예시를 누르면 바로 보내지 않고 입력창에 채워요. 사용자가 자기 상황에 맞게 고쳐서 보내게.
   const fillExample = (t: string) => {
     setInput(t);
@@ -268,6 +277,29 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [msgs, state, convId]);
 
+  /** 결과를 먼저 보여 준 뒤 상위 곳들의 링크·평점·카카오맵 정보를 받아 그 답의 표에 채워요 */
+  const enrich = async (msgId: number, rows: NonNullable<AgentReply['rows']>) => {
+    const items = rows.filter((r) => r.pending).map((r) => ({ id: r.id, url: r.reserve.url, mode: r.reserve.mode }));
+    let got: { id: string; place?: Row['place']; google?: Row['google']; naver?: Row['naver']; reserve: Row['reserve'] }[] = [];
+    try {
+      got = (await (await fetch('/api/enrich', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items }) })).json()).rows ?? [];
+    } catch {
+      // 못 받아도 표는 그대로 두고 "찾는 중" 표시만 지워요
+    }
+    const byId = new Map(got.map((g) => [g.id, g]));
+    setMsgs((m) =>
+      m.map((x) => {
+        if (x.id !== msgId || x.role !== 'agent' || !x.reply.rows) return x;
+        const rows2 = x.reply.rows.map((r) => {
+          const g = byId.get(r.id);
+          if (!g) return { ...r, pending: false };
+          return { ...r, pending: false, place: g.place ?? r.place, google: g.google, naver: g.naver, reserve: { ...r.reserve, ...g.reserve, mode: g.reserve.mode || r.reserve.mode } };
+        });
+        return { ...x, reply: { ...x.reply, rows: rows2 } };
+      }),
+    );
+  };
+
   const ask = useCallback(
     async (text: string, extra?: Places) => {
       const t = text.trim();
@@ -283,6 +315,7 @@ export default function Home() {
         setAnimateId(id);
         setState(reply.state);
         setMsgs((m) => [...m, { id, role: 'agent', reply }]);
+        if (reply.rows?.some((r) => r.pending)) void enrich(id, reply.rows);
         if (reply.rows?.length && reply.columns) {
           setView({ resultId: id, tab: 'results' });
           setShowPanel(true);
@@ -357,11 +390,33 @@ export default function Home() {
     }
   };
 
+  const category: 'camp' | 'pension' = state.category ?? (msgs.length ? 'camp' : pickedCat);
+  const exampleGroups = category === 'pension' ? PENSION_EXAMPLE_GROUPS : EXAMPLE_GROUPS;
+  const exTab = Math.min(exampleTab, exampleGroups.length - 1);
+  /** 상단 탭: 빈 대화면 종류만 바꾸고, 이미 대화 중이면 그 종류로 새 대화를 열어요 */
+  const pickCategory = (k: 'camp' | 'pension') => {
+    if (busy || k === category) return;
+    setPickedCat(k);
+    setExampleTab(0);
+    if (msgs.length) {
+      dirty.current = false;
+      setMsgs([]);
+      setConvId(newId());
+      setAnimateId(null);
+      setPanelOpen(false);
+      setView({ tab: 'results' });
+      setClosedTabs(new Set());
+      setSheetOpen(false);
+      setUrl(null);
+    }
+    setState({ ...EMPTY, category: k === 'pension' ? 'pension' : undefined });
+  };
+
   const startNew = () => {
     if (busy) return;
     dirty.current = false;
     setMsgs([]);
-    setState(EMPTY);
+    setState({ ...EMPTY, category: pickedCat === 'pension' ? 'pension' : undefined });
     setConvId(newId());
     setAnimateId(null);
     setPanelOpen(false);
@@ -500,11 +555,20 @@ export default function Home() {
                   <p>
                     <span className="text-stone-400">우리 집</span> {home ? home.address || home.label : '없음'}
                   </p>
-                  {profileSummary(profile) && (
-                    <p className="mt-0.5">
-                      <span className="text-stone-400">기본 반영</span> {profileSummary(profile)}
-                    </p>
-                  )}
+                  {(() => {
+                    const r = profileRows(profile);
+                    return [
+                      ['인원·반려견', r.base],
+                      ['캠핑장', r.camp],
+                      ['펜션·민박', r.pension],
+                    ]
+                      .filter(([, v]) => v)
+                      .map(([k, v]) => (
+                        <p key={k} className="mt-0.5">
+                          <span className="text-stone-400">{k}</span> {v}
+                        </p>
+                      ));
+                  })()}
                   <p className="mt-1.5 text-[11px] text-stone-400">새 대화를 시작할 때 기본으로 반영돼요</p>
                 </>
               ) : (
@@ -513,21 +577,32 @@ export default function Home() {
             </div>
           </div>
           <nav className="flex gap-1 rounded-lg bg-stone-100 p-1 text-sm">
-            {CATEGORIES.map((c) => (
-              <span
-                key={c.name}
-                title={c.ready ? undefined : '카테고리 팩 준비 중'}
-                className={c.ready ? 'whitespace-nowrap rounded-md bg-white px-3 py-1 font-medium shadow-sm' : 'hidden cursor-not-allowed whitespace-nowrap px-3 py-1 text-stone-400 sm:inline'}
-              >
-                {c.name}
-              </span>
-            ))}
+            {CATEGORIES.map((c) =>
+              c.key ? (
+                <button
+                  key={c.name}
+                  onClick={() => pickCategory(c.key!)}
+                  className={
+                    category === c.key
+                      ? 'whitespace-nowrap rounded-md bg-white px-3 py-1 font-medium shadow-sm'
+                      : 'whitespace-nowrap rounded-md px-3 py-1 text-stone-600 hover:text-stone-900'
+                  }
+                >
+                  {c.name}
+                </button>
+              ) : (
+                <span key={c.name} title="카테고리 팩 준비 중" className="hidden cursor-not-allowed whitespace-nowrap px-3 py-1 text-stone-400 sm:inline">
+                  {c.name}
+                </span>
+              ),
+            )}
           </nav>
           </div>
         </div>
       </header>
       {profileOpen && (
         <ProfileModal
+          initialCat={category}
           profile={profile}
           home={home}
           onSave={(p) => {
@@ -577,26 +652,26 @@ export default function Home() {
             <div className={`mx-auto space-y-6 px-5 py-6 ${panelVisible ? 'max-w-3xl' : 'max-w-5xl'}`}>
               {msgs.length === 0 && (
                 <section className="rise mx-auto max-w-3xl pt-10 text-center">
-                  <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">어떤 캠핑장을 찾고 있어요?</h1>
+                  <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">{category === 'pension' ? '어떤 펜션을 찾고 있어요?' : '어떤 캠핑장을 찾고 있어요?'}</h1>
                   <p className="mt-2 text-stone-600">날짜, 인원, 지역, 시설, 분위기까지 생각나는 대로 말해 주세요. 대신 찾아보고 근거와 함께 골라 드릴게요.</p>
                   <div className="mt-8 space-y-4 text-left">
                     <div>
                       <div className="mb-2 flex items-center gap-1">
-                        {EXAMPLE_GROUPS.map((g, i) => (
+                        {exampleGroups.map((g, i) => (
                           <button
                             key={g.name}
                             onClick={() => setExampleTab(i)}
-                            className={`rounded-full px-3 py-1 text-sm ${exampleTab === i ? 'bg-stone-800 font-medium text-white' : 'text-stone-600 hover:bg-stone-100'}`}
+                            className={`rounded-full px-3 py-1 text-sm ${exTab === i ? 'bg-stone-800 font-medium text-white' : 'text-stone-600 hover:bg-stone-100'}`}
                           >
                             {g.name}
                           </button>
                         ))}
                       </div>
                       <p className="mb-2 px-1 text-xs text-stone-500">
-                        <span className="font-medium text-stone-700">{EXAMPLE_GROUPS[exampleTab].name}</span> · {EXAMPLE_GROUPS[exampleTab].hint}
+                        <span className="font-medium text-stone-700">{exampleGroups[exTab].name}</span> · {exampleGroups[exTab].hint}
                       </p>
                       <div className="grid gap-2 sm:grid-cols-2">
-                        {EXAMPLE_GROUPS[exampleTab].items.map((e, i, arr) => (
+                        {exampleGroups[exTab].items.map((e, i, arr) => (
                           <button
                             key={e.text}
                             onClick={() => fillExample(e.text)}
@@ -611,9 +686,9 @@ export default function Home() {
                       </div>
                     </div>
                   </div>
-                  {profileSummary(profile) && (
+                  {profileSummary(profile, category) && (
                     <p className="mt-4 text-xs text-stone-500">
-                      내 정보가 기본으로 반영돼요: <span className="font-medium text-stone-700">{profileSummary(profile)}</span>{' '}
+                      내 정보가 기본으로 반영돼요: <span className="font-medium text-stone-700">{profileSummary(profile, category)}</span>{' '}
                       <button onClick={() => setProfileOpen(true)} className="text-brand-700 hover:underline">
                         수정
                       </button>
