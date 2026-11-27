@@ -9,8 +9,8 @@ export interface ExampleGroup {
   items: Example[];
 }
 
-/** 빈자리 자동 확인 예시. 자동 확인은 캠핑톡 공공 캠핑장(평택 소풍정원 등)만 돼서 지역을 태그에 밝혀 둬요 */
-export const AVAILABILITY_EXAMPLE: Example = { tag: '빈자리 확인 (평택)', text: '이번 주말 평택 쪽 캠핑장 찾아서 빈자리 있는지까지 확인해 줘' };
+/** 빈자리 자동 확인 예시. 자동 확인은 캠핑톡 공공 캠핑장만 돼서 지역을 태그에 밝혀 둬요. 평택 소풍정원은 겨울에 쉬어서 겨울에도 여는 논산 대둔산 수락오토캠핑장으로 */
+export const AVAILABILITY_EXAMPLE: Example = { tag: '빈자리 확인 (논산)', text: '이번 주말 논산 쪽 캠핑장 찾아서 빈자리 있는지까지 확인해 줘' };
 
 /** 첫 화면 예시: 유형별로 나눠서, 유형마다 많이 찾는 조건을 보여 줘요 */
 export const EXAMPLE_GROUPS: ExampleGroup[] = [

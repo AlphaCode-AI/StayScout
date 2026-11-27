@@ -5,6 +5,19 @@ import type { AgentState, Cond, Places } from './types';
 
 const DAYS = ['일', '월', '화', '수', '목', '금', '토'];
 
+/** 지난 날짜(YYYY-MM-DD)면 같은 월·일의 다가오는 날짜로 바꿔요 */
+export function futureDate(iso: string) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return iso;
+  const now = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+  if (iso >= now) return iso;
+  for (let y = Number(now.slice(0, 4)); y <= Number(now.slice(0, 4)) + 1; y++) {
+    const c = `${y}-${m[2]}-${m[3]}`;
+    if (c >= now) return c;
+  }
+  return iso;
+}
+
 export function dateLabel(checkIn: string, nights = 1) {
   const d = new Date(`${checkIn}T00:00:00`);
   if (Number.isNaN(d.getTime())) return undefined;
@@ -204,9 +217,11 @@ export function mergeDelta(
   if (llm.checkIn) {
     // 사용자가 박 수를 말하지 않았으면 1박으로 봐요 (모델이 주말을 2박으로 잡는 경우가 있어요)
     const nights = llm.nights && llm.nights > 1 && /\d\s*박|연박|이틀|사흘|2박|3박/.test(text) ? llm.nights : 1;
-    const d = dateLabel(llm.checkIn, nights);
+    // 모델이 연도를 틀리게 쓰는 경우가 있어요 ("12월 둘째주"를 작년 날짜로). 지난 날짜면 올해·내년으로 옮겨요.
+    const checkIn = futureDate(llm.checkIn);
+    const d = dateLabel(checkIn, nights);
     if (d) {
-      state.checkIn = llm.checkIn;
+      state.checkIn = checkIn;
       state.nights = nights;
       state.dateLabel = d.label;
       state.season = d.season;

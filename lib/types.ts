@@ -38,6 +38,7 @@ export interface AgentState {
   category?: 'camp' | 'pension'; // 지금 찾는 숙소 종류 (없으면 캠핑장)
   maxPrice?: number; // 1박 최대 가격(원). 펜션만
   focusId?: string; // 방금 상세를 본 캠핑장 ("반려동물 가능해?" 같은 후속 질문의 대상)
+  wantLive?: boolean; // 빈자리 확인을 부탁했어요 → 자동 확인되는 곳을 순위에서 앞에
   pendingAvailability?: number; // 빈자리 확인 중 날짜를 물어본 숙소 번호 (다음 답이 날짜면 이어서 확인)
 }
 
@@ -73,6 +74,7 @@ export interface Row {
   place?: { name: string; phone?: string; url: string; renamed: boolean }; // 카카오맵의 지금 정보
   google?: { website?: string; rating?: number; reviews?: number; phone?: string; mapsUrl?: string }; // 구글에 등록된 정보 (펜션)
   naver?: { link?: string; linkKind?: string; phone?: string };
+  route?: { minutes: number; km: number; departure?: string; over?: boolean }; // 카카오내비 실제 이동 시간 (상위 10곳, 뒤에 채워요)
   pending?: boolean; // 링크·평점·카카오맵 정보를 아직 찾는 중 (화면이 /api/enrich로 뒤에 채워요) // 네이버 지역 검색에 등록된 링크 (구글에 홈페이지가 없을 때)
 }
 

@@ -276,11 +276,12 @@ export default function Home() {
   }, [msgs, state, convId]);
 
   /** 결과를 먼저 보여 준 뒤 상위 곳들의 링크·평점·카카오맵 정보를 받아 그 답의 표에 채워요 */
-  const enrich = async (msgId: number, rows: NonNullable<AgentReply['rows']>) => {
+  const enrich = async (msgId: number, rows: NonNullable<AgentReply['rows']>, st: AgentReply['state']) => {
     const ids = rows.filter((r) => r.pending).map((r) => r.id);
-    let got: { id: string; place?: Row['place']; google?: Row['google']; naver?: Row['naver']; reserve: Row['reserve'] }[] = [];
+    const trip = { origin: st.origin, originCoords: st.originCoords, checkIn: st.checkIn, maxMinutes: st.maxMinutes };
+    let got: { id: string; place?: Row['place']; google?: Row['google']; naver?: Row['naver']; route?: Row['route']; reserve: Row['reserve'] }[] = [];
     try {
-      got = (await (await fetch('/api/enrich', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids }) })).json()).rows ?? [];
+      got = (await (await fetch('/api/enrich', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids, trip }) })).json()).rows ?? [];
     } catch {
       // 못 받아도 표는 그대로 두고 "찾는 중" 표시만 지워요
     }
@@ -288,14 +289,28 @@ export default function Home() {
     setMsgs((m) =>
       m.map((x) => {
         if (x.id !== msgId || x.role !== 'agent' || !x.reply.rows) return x;
-        const rows2 = x.reply.rows.map((r) => {
+        let rows2 = x.reply.rows.map((r) => {
           const g = byId.get(r.id);
           if (!g) return { ...r, pending: false };
-          return { ...r, pending: false, place: g.place ?? r.place, google: g.google, naver: g.naver, reserve: { ...r.reserve, ...g.reserve, mode: g.reserve.mode || r.reserve.mode } };
+          return { ...r, pending: false, place: g.place ?? r.place, google: g.google, naver: g.naver, route: g.route, reserve: { ...r.reserve, ...g.reserve, mode: g.reserve.mode || r.reserve.mode } };
         });
-        return { ...x, reply: { ...x.reply, rows: rows2 } };
+        // 길찾기로 재 보니 이동 시간 조건을 넘는 곳은 아래로 내리고 번호를 다시 매겨요 ("N번 자세히 보기"와 맞게 상태의 순서도 바꿔요)
+        const over = rows2.filter((r) => r.route?.over);
+        if (!over.length) return { ...x, reply: { ...x.reply, rows: rows2 } };
+        rows2 = [...rows2.filter((r) => !r.route?.over), ...over].map((r, i) => ({ ...r, rank: i + 1 }));
+        const lastIds = [...rows2.map((r) => r.id), ...(x.reply.state.lastIds ?? []).slice(rows2.length)];
+        const fmt = (n: number) => (n >= 60 ? `${Math.floor(n / 60)}시간${n % 60 ? ` ${n % 60}분` : ''}` : `${n}분`);
+        const note = `실제 길찾기로 재 보니 ${over.length}곳은 ${fmt(x.reply.state.maxMinutes ?? 0)}보다 오래 걸려서 아래로 내렸어요.`;
+        return { ...x, reply: { ...x.reply, rows: rows2, text: `${x.reply.text}\n${note}`, state: { ...x.reply.state, lastIds } } };
       }),
     );
+    // 지금 대화 상태가 이 결과라면 번호 순서도 같이 바꿔요 (위와 같은 규칙으로 계산)
+    const from = rows.map((r) => r.id);
+    const overIds = new Set(got.filter((g) => g.route?.over).map((g) => g.id));
+    if (overIds.size) {
+      const head = [...from.filter((id) => !overIds.has(id)), ...from.filter((id) => overIds.has(id))];
+      setState((s) => (s.lastIds && from.every((id, i) => s.lastIds![i] === id) ? { ...s, lastIds: [...head, ...s.lastIds.slice(head.length)] } : s));
+    }
   };
 
   const ask = useCallback(
@@ -312,7 +327,7 @@ export default function Home() {
         const id = ++seq.current;
         setState(reply.state);
         setMsgs((m) => [...m, { id, role: 'agent', reply }]);
-        if (reply.rows?.some((r) => r.pending)) void enrich(id, reply.rows);
+        if (reply.rows?.some((r) => r.pending)) void enrich(id, reply.rows, reply.state);
         if (reply.rows?.length && reply.columns) {
           setView({ resultId: id, tab: 'results' });
           setShowPanel(true);
@@ -753,7 +768,7 @@ export default function Home() {
               </button>
             </form>
             <p className={`mx-auto px-5 pb-3 text-[11px] text-stone-400 ${panelVisible ? 'max-w-3xl' : 'max-w-5xl'}`}>
-              데이터: 한국관광공사·행정안전부·산림청 공공데이터, 카카오맵 · Gemini 에이전트가 도구를 골라 처리 (실패 시 기본 순서로 자동 전환) · 이동 시간은 직선거리 기반 추정
+              데이터: 한국관광공사·행정안전부·산림청 공공데이터, 카카오맵 · Gemini 에이전트가 도구를 골라 처리 (실패 시 기본 순서로 자동 전환) · 이동 시간은 직선거리로 먼저 거르고 상위 10곳은 카카오내비 길찾기로 다시 재요
             </p>
           </footer>
         </div>

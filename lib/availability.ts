@@ -44,7 +44,8 @@ const PLATFORMS: [RegExp, string][] = [
 
 export function reservationInfo(camp: Camp) {
   const url = (camp.resveUrl || camp.homepage || '').trim();
-  const ct = url.match(/campingtalk\.me\/pubsec\/camp\/(\d+)/i);
+  // 예약 주소가 네이버여도 홈페이지가 캠핑톡 공공 캠핑장이면 빈자리를 확인할 수 있어요 (예: 대둔산 수락오토캠핑장)
+  const ct = `${camp.resveUrl || ''} ${camp.homepage || ''}`.match(/campingtalk\.me\/pubsec\/camp\/(\d+)/i);
   const platform = PLATFORMS.find(([re]) => re.test(url))?.[1] ?? (url ? '자체 예약 페이지' : camp.resveCl?.includes('전화') ? '전화 예약' : '정보 없음');
   return {
     url: toUrl(camp.resveUrl) || toUrl(camp.homepage),

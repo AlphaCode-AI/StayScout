@@ -260,8 +260,9 @@ export function estimateMinutes(origin: [number, number], camp: Camp): number | 
     Math.sin(dLat / 2) ** 2 +
     Math.cos((origin[0] * Math.PI) / 180) * Math.cos((lat * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
   const km = 2 * R * Math.asin(Math.sqrt(a));
-  const roadKm = km * 1.35; // 도로 우회 보정
-  return Math.round(10 + (roadKm / 62) * 60); // 주말 평균 시속 62km + 출발 준비 10분
+  // 직선거리 → 차로 걸리는 시간. 카카오내비 길찾기(토요일 오전 10시 출발) 52건으로 맞춘 식이에요 (11/27).
+  // 가까운 곳은 국도·산길이 많아 느리고, 먼 곳은 고속도로라 빨라서 거리에 비례하지 않아요. 평균 오차 19% → 10%.
+  return Math.round(7.9 * km ** 0.62);
 }
 
 const list = (s: string) =>

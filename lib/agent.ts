@@ -5,6 +5,7 @@ import { nameCore, normName } from './names';
 import { kakaoExtras, placeNow } from './kakao';
 import { googlePhotoUrls, googlePlace } from './google';
 import { ogImage } from './ogimage';
+import { driveRoute } from './route';
 import { naverPlace } from './naver';
 import { linkAlive, naverSearch, phoneLooksValid, toUrl } from './links';
 import { applyPlaces, interpret } from './interpret';
@@ -98,7 +99,7 @@ function pipeline(camps: Camp[], ctx: Ctx, override?: Partial<AgentState>) {
     const parts = [s.regions.map((r) => r.replace(/(특별자치도|특별시|광역시)$/, '')).join('·'), s.maxMinutes && s.origin ? `${s.origin}에서 ${fmtMin(s.maxMinutes)} 이내` : '']
       .filter(Boolean)
       .join(' 또는 ');
-    stages.push({ label: parts, count: pool.length, note: s.maxMinutes && s.origin ? '이동 시간은 직선거리 기반 추정' : undefined });
+    stages.push({ label: parts, count: pool.length, note: s.maxMinutes && s.origin ? '직선거리로 추정해 거르고, 상위 10곳은 길찾기로 다시 재요' : undefined });
     mark();
   }
 
@@ -154,6 +155,8 @@ export function score(c: Camp, s: AgentState, minutes?: number) {
   if (s.regions.length && inRegion(c, s.regions)) sc += 4;
   if (c.resveCl.includes('온라인')) sc += 1;
   if (minutes !== undefined) sc -= Math.min(3, minutes / 60);
+  // "빈자리까지 확인해 줘"라고 했으면 빈자리를 실제로 확인할 수 있는 곳을 앞에 둬요 (선호 조건 몇 개보다 크게)
+  if (s.wantLive && canCheckLive(c)) sc += 40;
   return sc;
 }
 
@@ -297,14 +300,26 @@ export function markPending(rows: Row[]) {
  * /api/enrich: 상위 곳들의 카카오맵·구글·네이버 정보와 링크 확인 결과.
  * 화면에서는 숙소 id만 받고, 확인할 링크는 서버가 숙소 데이터에서 직접 찾아요 (아무 주소나 서버가 열지 않게).
  */
-export async function enrichRows(ids: string[]) {
-  const rows = ids
+export async function enrichRows(ids: string[], trip: { origin?: string; originCoords?: [number, number]; checkIn?: string; maxMinutes?: number } = {}) {
+  const camps = ids
     .slice(0, 10)
     .map((id) => campById(id))
-    .filter((c): c is Camp => !!c)
-    .map((c, i) => ({ id: c.contentId, rank: i + 1, reserve: reserveOf(c) }) as unknown as Row);
-  await attachPlaces(rows);
-  return rows.map((r) => ({ id: r.id, place: r.place, google: r.google, naver: r.naver, reserve: r.reserve }));
+    .filter((c): c is Camp => !!c);
+  const rows = camps.map((c, i) => ({ id: c.contentId, rank: i + 1, reserve: reserveOf(c) }) as unknown as Row);
+  // 출발지가 있으면 상위 곳의 실제 이동 시간을 카카오내비로 재요 (링크·평점과 동시에)
+  const from = trip.originCoords ?? originCoords(trip.origin);
+  await Promise.all([
+    attachPlaces(rows),
+    from
+      ? Promise.all(
+          camps.map(async (c, i) => {
+            const r = await driveRoute(from, [Number(c.mapY), Number(c.mapX)], trip.checkIn);
+            if (r) rows[i].route = { ...r, over: !!trip.maxMinutes && r.minutes > trip.maxMinutes };
+          }),
+        )
+      : null,
+  ]);
+  return rows.map((r) => ({ id: r.id, place: r.place, google: r.google, naver: r.naver, reserve: r.reserve, route: r.route }));
 }
 
 /** 상위 곳에 구글·네이버 링크·평점(펜션)과 카카오맵 지금 이름·전화(캠핑장), 링크 열림 여부를 붙여요. 실패하면 그대로 둬요. */
@@ -573,6 +588,14 @@ export async function availabilityOf(state: AgentState, index: number): Promise<
   const a = await checkAvailability(camp, state.checkIn, state.nights ?? 1, state.people, state.dateLabel ?? state.checkIn);
   if (a.status === 'ok') {
     const open = a.zones.filter((z) => z.left > 0);
+    const eun = (() => { const c = a.camp.charCodeAt(a.camp.length - 1); return c >= 0xac00 && c <= 0xd7a3 && (c - 0xac00) % 28 ? '은' : '는'; })();
+    // 달력에 그 날짜가 아예 없으면 마감이 아니라 예약을 받지 않는 날이에요 (운영 기간이 아니거나 아직 예약이 안 열림)
+    if (!a.zones.length)
+      return {
+        text: `${a.camp}${eun} ${a.dateLabel}에 예약을 받지 않아요. 운영 기간이 아니거나 아직 예약이 열리지 않은 날짜예요. (${a.platform} 기준, ${a.checkedAt} 확인)`,
+        availability: a,
+        chips: ['다음주 주말로 바꿔 줘', '결과 목록 다시 보기'],
+      };
     const text = open.length
       ? `${a.camp}, ${a.dateLabel}에 ${open.map((z) => `${z.name} ${z.left}자리`).join(', ')} 남아 있어요. (${a.platform} 기준, ${a.checkedAt} 확인)`
       : `${a.camp}${(() => { const c = a.camp.charCodeAt(a.camp.length - 1); return c >= 0xac00 && c <= 0xd7a3 && (c - 0xac00) % 28 ? '은' : '는'; })()} ${a.dateLabel}에 남은 자리가 없어요. (${a.platform} 기준, ${a.checkedAt} 확인)`;
@@ -738,10 +761,26 @@ export { chipsFor };
 export async function runAgent(text: string, prevIn: AgentState, places?: Places, profile?: Profile): Promise<AgentReply> {
   // 새 대화 첫 말에 "펜션"이 있으면 펜션용 내 정보 조건을 깔아요
   const guess = prevIn.category ?? (!prevIn.conds.length && /펜션|독채|풀빌라|민박/.test(text) ? 'pension' : undefined);
-  const reply = await runAgentInner(text, applyProfile({ ...prevIn, category: guess }, profile), places);
+  // 빈자리를 확인해 달라는 말이 있으면 확인 가능한 곳을 순위에서 앞에 두라고 표시해요 (이어지는 날짜 변경에도 유지)
+  const wantLive = prevIn.wantLive || (/빈자리|남은\s*자리|잔여|자리\s*(있|남)/.test(text) && /확인|있는지|있어|있나|있을까|남았|남아|볼\s*수|되나|돼\?/.test(text)) || undefined;
+  const reply = await runAgentInner(text, applyProfile({ ...prevIn, category: guess, wantLive }, profile), places);
   // 상세를 보여 줬으면 그곳을 "지금 이야기 중인 캠핑장"으로 기억하고, 새 검색 결과가 나오면 잊어요
   if (reply.detail) reply.state = { ...reply.state, focusId: reply.detail.id };
   else if (reply.kind === 'result' && reply.state.focusId) reply.state = { ...reply.state, focusId: undefined };
+  // "찾아서 빈자리까지 확인해 줘"처럼 한 번에 부탁했는데 에이전트가 빈자리를 안 봤으면, 자동 확인되는 곳의 빈자리를 같은 답에서 확인해요
+  if (reply.kind === 'result' && /빈자리|남은\s*자리|잔여|자리\s*(있|남)/.test(text) && /확인|있는지|있어|있나|있을까|남았|남아|볼\s*수|되나|돼\?/.test(text) && reply.state.checkIn && reply.rows?.some((r) => r.liveCheck) && !reply.availability && !reply.trace?.some((t) => t.tool === 'check_availability')) {
+    const live = await liveAll({ ...reply.state });
+    if (live.availabilities?.length) {
+      // 에이전트가 "빈자리는 자동으로 확인할 수 없어요"처럼 쓴 문장은 실제로 확인한 결과와 어긋나서 빼요
+      const kept = reply.text
+        .split(/(?<=[.!?요])\s+/)
+        .filter((s) => !/(빈자리|예약 현황)[^.!?]*(확인할 수 없|확인이 어렵|확인하기 어렵|자동으로 확인)/.test(s))
+        .join(' ');
+      reply.text = `${kept}\n${live.text}`;
+      reply.availabilities = live.availabilities;
+      reply.trace = [...(reply.trace ?? []), ...(live.trace ?? [])];
+    }
+  }
   let chips = filterChips(reply.chips, reply.state);
   // 결과에 자동 확인 가능한 곳이 있으면 "확인 가능한 곳만 빈자리 확인" 버튼을 맨 앞에 둬요
   if (reply.rows?.some((r) => r.liveCheck) && !chips.includes(LIVE_ALL)) {
@@ -789,11 +828,14 @@ export function lookupCampsByName(name: string, area?: string): Camp[] {
   if (same.length) return same;
   const within = camps.filter((c) => nameCore(c.facltNm).includes(t));
   if (within.length) return within;
-  // 사용자가 이름 뒤에 다른 말을 붙였을 때 (예: "하조대캠핑카예약")
-  return camps.filter((c) => {
+  // 사용자가 이름 앞뒤에 다른 말을 붙였을 때 (예: "하조대캠핑카예약", "평택 소풍정원 캠핑장")
+  const around = camps.filter((c) => {
     const n = nameCore(c.facltNm);
-    return n.length >= 3 && t.startsWith(n);
+    return n.length >= 3 && t.includes(n);
   });
+  // 앞에 붙은 말이 그 숙소의 지역이면 그곳을 먼저 (예: "평택" + 소풍정원 → 평택시의 소풍정원)
+  const local = around.filter((c) => t.startsWith(nameCore(c.sigunguNm.replace(/(시|군|구)$/, ''))));
+  return local.length ? local : around;
 }
 
 async function runAgentInner(text: string, prevIn: AgentState, places?: Places): Promise<AgentReply> {

@@ -22,7 +22,8 @@ import {
   searchOf,
   regions,
 } from './agent';
-import { campById, evalCond, loadCamps, originCoords, type Camp } from './data';
+import { campById, estimateMinutes, evalCond, loadCamps, originCoords, type Camp } from './data';
+import { driveRoute } from './route';
 import { nameCore } from './names';
 import { applyPlaces, mergeDelta } from './interpret';
 import { AGENT_MODELS, CATALOG, SCHEMA, dateContext, generate, type LlmResult } from './llm';
@@ -80,6 +81,21 @@ const TOOLS = [
         },
       },
       {
+        name: 'check_route',
+        description:
+          '출발지에서 숙소 하나까지 자동차로 실제 얼마나 걸리는지 카카오내비 길찾기로 재요. "얼마나 걸려?", "주말 점심에도?", "몇 시에 출발하면?" 같은 이동 시간 질문에는 직접 짐작하지 말고 반드시 이 도구를 써. 검색 조건은 바꾸지 않아요.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            reason,
+            target: { type: 'STRING', description: '어느 숙소인지: 결과 표 번호("3"), 방금 본 곳("current"), 또는 숙소 이름' },
+            date: { type: 'STRING', description: '출발 날짜 YYYY-MM-DD (오늘 날짜 기준으로 계산해서). 말이 없으면 지금 조건의 체크인 날짜, 그것도 없으면 비워' },
+            time: { type: 'STRING', description: '출발 시각 HH:MM 24시간 (예: "점심" 12:00, "아침" 09:00, "저녁" 18:00). 말이 없으면 비워' },
+          },
+          required: ['target'],
+        },
+      },
+      {
         name: 'find_similar',
         description: '기준 숙소와 비슷한 곳(유형·개인화장실·입지·화로대·규모가 비슷하고 1시간 거리 안)을 찾아 결과 표로 보여 줘요. 검색 조건이 이 기준으로 바뀌어요.',
         parameters: { type: 'OBJECT', properties: { reason, target: { type: 'STRING', description: '어느 숙소인지: 결과 표 번호("3"), 방금 본 곳("current"), 또는 숙소 이름(지역을 알면 "이름 (시군)")' } }, required: ['target'] },
@@ -87,8 +103,8 @@ const TOOLS = [
       {
         name: 'check_availability',
         description:
-          '직전 결과 표의 N번 숙소의 실제 빈자리를 확인해요. 지금은 캠핑톡 공공 캠핑장만 자동 확인이 되고(검색 결과의 빈자리확인가능=true), 나머지는 unsupported를 돌려줘요. 날짜가 없으면 need_date를 돌려줘요.',
-        parameters: { type: 'OBJECT', properties: { reason, rank: { type: 'INTEGER' } }, required: ['rank'] },
+          '숙소 하나의 실제 빈자리를 확인해요. 결과 표 번호(rank)나 숙소 이름·방금 본 곳(target) 중 하나로 지정해요. 지금은 캠핑톡 공공 캠핑장만 자동 확인이 되고(검색 결과의 빈자리확인가능=true), 나머지는 unsupported를 돌려줘요. 날짜가 없으면 need_date를 돌려줘요. 확인할 수 있는지 짐작하지 말고 먼저 불러 봐.',
+        parameters: { type: 'OBJECT', properties: { reason, rank: { type: 'INTEGER' }, target: { type: 'STRING', description: '결과 표에 없는 숙소면 이름, 방금 본 곳이면 "current"' } } },
       },
       {
         name: 'draft_inquiry',
@@ -151,9 +167,10 @@ ${JSON.stringify(current)}
 1. 사용자의 말에 조건이 새로 나오거나 바뀌면 먼저 update_conditions를 불러. 바뀐 것만 넣어.
 2. 그다음 search_camps로 찾아. need_info가 오면 그 question과 options를 그대로 ask_user로 물어봐.
 3. 결과가 3곳 미만이면 suggest_relaxations를 부르고, 무엇을 풀면 몇 곳이 늘어나는지 finish에서 안내해.
-4. 특정 숙소 하나(캠핑장·펜션)에 대한 말이면 검색하지 마. 이름으로 못 찾았으면 비슷한 곳을 검색하지 말고 못 찾았다고 답해(사용자가 대신 찾아 달라고 한 경우만 검색). 정보·상세를 원하면 get_camp, 그곳에 어떤 조건이 되는지 물으면 check_camp, 비슷한 곳을 원하면 find_similar를 불러. target은 결과 표 번호, 이름, 또는 방금_본_캠핑장을 가리킬 때 "current"야. "N번에 문의/물어봐"는 draft_inquiry, "N번 빈자리/예약 가능?"은 check_availability를 부른 뒤 finish.
+4. 특정 숙소 하나(캠핑장·펜션)에 대한 말이면 검색하지 마. 그곳까지 걸리는 시간을 물으면 check_route를 불러(이어지는 "그 시간에도?", "점심에도?"도 같아). 이름으로 못 찾았으면 비슷한 곳을 검색하지 말고 못 찾았다고 답해(사용자가 대신 찾아 달라고 한 경우만 검색). 정보·상세를 원하면 get_camp, 그곳에 어떤 조건이 되는지 물으면 check_camp, 비슷한 곳을 원하면 find_similar를 불러. target은 결과 표 번호, 이름, 또는 방금_본_캠핑장을 가리킬 때 "current"야. "N번에 문의/물어봐"는 draft_inquiry, "N번 빈자리/예약 가능?"은 check_availability를 부른 뒤 finish.
    - finish의 suggestions에 "N번 빈자리 확인해 줘"는 빈자리확인가능=true인 곳에만 넣어. 그런 곳이 없으면 빈자리 관련 제안을 넣지 마.
    - 사용자가 번호 없이 "빈자리까지 확인해 줘"라고 하면, 검색 결과 중 빈자리확인가능=true인 곳을 골라 check_availability를 불러. 그런 곳이 없으면 자동 확인이 안 된다고 정직하게 말해.
+   - "그럼 12월 둘째주는 빈자리 있어?"처럼 날짜만 바꿔 빈자리를 다시 물으면, update_conditions로 날짜만 바꾸고 search_camps 뒤에 빈자리확인가능=true인 곳마다 check_availability를 불러. 자동 확인되는 곳이 하나라도 있으면 "빈자리를 자동으로 확인할 수 없다"고 뭉뚱그려 말하지 말고, 확인한 곳과 확인 못 하는 곳을 나눠서 말해.
    - 빈자리는 check_availability가 status ok를 돌려준 경우에만 "남아 있다/없다"고 말해. unsupported면 "자동으로 확인할 수 없는 예약처"라고 말하고 절대 추측하지 마.
 5. "처음부터 다시"는 reset_conditions 후 finish로 어떤 조건을 원하는지 물어.
 6. 반드시 ask_user 또는 finish로 끝내. 한 번에 도구 하나씩 불러.
@@ -287,6 +304,7 @@ const LABEL: Record<string, string> = {
   suggest_relaxations: '조건 완화 계산',
   get_camp: '상세 정보 확인',
   check_camp: '조건 확인',
+  check_route: '이동 시간 재기',
   find_similar: '비슷한 곳 찾기',
   draft_inquiry: '문의 메시지 작성',
   ask_user: '사용자에게 질문',
@@ -470,6 +488,24 @@ export async function runAgentLoop(text: string, prev: AgentState, places?: Plac
           trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: 'camp' in r ? r.camp.facltNm : '찾지 못함' });
           break;
         }
+        case 'check_route': {
+          const r = resolveCamp(String(args.target ?? ''), state);
+          const from = state.originCoords ?? originCoords(state.origin);
+          if (!('camp' in r)) result = r;
+          else if (!from) result = { error: '출발지를 몰라요. 어디에서 출발하는지 사용자에게 물어봐(ask_user).' };
+          else {
+            const date = /^\d{4}-\d{2}-\d{2}$/.test(String(args.date ?? '')) ? String(args.date) : state.checkIn;
+            const time = /^\d{1,2}:\d{2}$/.test(String(args.time ?? '')) ? String(args.time) : undefined;
+            const route = await driveRoute(from, [Number(r.camp.mapY), Number(r.camp.mapX)], date ? `${date}${time ? `T${time}` : ''}` : undefined);
+            checked = true;
+            focus = r.camp.contentId;
+            result = route
+              ? { name: r.camp.facltNm, 출발지: state.origin ?? '우리 집', 걸리는_분: route.minutes, 거리_km: route.km, 기준: route.departure ? `${route.departure} 출발 (예상 교통)` : '지금 출발 (실시간 교통)', 안내: '이 숫자 그대로 답해. 범위로 짐작하지 마.' }
+              : { error: '길찾기를 하지 못했어요 (길이 없거나 오늘 한도). 직선거리 추정만 있다고 솔직하게 말해.', 직선거리_추정_분: estimateMinutes(from, r.camp) };
+          }
+          trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: 'camp' in r && result && '걸리는_분' in (result as object) ? `${(result as { 걸리는_분: number }).걸리는_분}분` : undefined });
+          break;
+        }
         case 'find_similar': {
           const r = resolveCamp(String(args.target ?? ''), state);
           if ('camp' in r) {
@@ -493,7 +529,16 @@ export async function runAgentLoop(text: string, prev: AgentState, places?: Plac
           break;
         }
         case 'check_availability': {
-          const a = await availabilityOf(state, Number(args.rank));
+          // 번호가 없으면 이름·방금 본 곳으로 찾아서 확인해요
+          let a: Awaited<ReturnType<typeof availabilityOf>> = null;
+          if (Number(args.rank) > 0) a = await availabilityOf(state, Number(args.rank));
+          else if (args.target) {
+            const r = resolveCamp(String(args.target), state);
+            if ('camp' in r) {
+              a = await availabilityOf({ ...state, lastIds: [r.camp.contentId] }, 1);
+              focus = r.camp.contentId;
+            }
+          }
           if (!a) {
             result = { error: '그 번호의 숙소가 없어요.' };
           } else if (a.needDate) {

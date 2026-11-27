@@ -4,6 +4,7 @@ import { Fragment, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { AgentReply, Column, DetailCard as Detail, Relax, Row, Stage, Verdict } from '@/lib/types';
 
+const routeTitle = (r: NonNullable<Row['route']>) => `카카오내비 길찾기 · ${r.km}km · ${r.departure ? `${r.departure} 출발 기준` : '지금 교통 기준'}`;
 const fmtMin = (m: number) => (m >= 60 ? `${Math.floor(m / 60)}시간${m % 60 ? ` ${m % 60}분` : ''}` : `${m}분`);
 
 /** 내 정보에서 들어온 조건 표시용 작은 집 아이콘 */
@@ -256,7 +257,14 @@ export function ResultTable({
                 <RankDelta c={changes?.[r.id]} />
                 <span className="mt-0.5 block text-xs text-stone-500">
                   {r.area} · {r.type}
-                  {r.minutes !== undefined && ` · 약 ${fmtMin(r.minutes)}`}
+                  {r.route ? (
+                    <span className={r.route.over ? 'text-rose-600' : ''} title={routeTitle(r.route)}>
+                      {` · ${fmtMin(r.route.minutes)}`}
+                      {r.route.over && ' (시간 초과)'}
+                    </span>
+                  ) : (
+                    r.minutes !== undefined && ` · 약 ${fmtMin(r.minutes)}`
+                  )}
                 </span>
                 {r.place?.renamed && <span className="mt-0.5 block text-xs text-amber-700">카카오맵 이름: {r.place.name}</span>}
                 <ReserveNote r={r} />
@@ -372,7 +380,23 @@ export function ResultTable({
                   </div>
                   </div>
                 </td>
-                {hasMinutes && <td className="whitespace-nowrap px-2 py-2.5 tabular-nums text-stone-700">{r.minutes !== undefined ? fmtMin(r.minutes) : '-'}</td>}
+                {hasMinutes && (
+                  <td className="whitespace-nowrap px-2 py-2.5 tabular-nums text-stone-700">
+                    {r.route ? (
+                      <span title={routeTitle(r.route)} className={r.route.over ? 'text-rose-600' : ''}>
+                        {fmtMin(r.route.minutes)}
+                        <span className={`block text-[10px] ${r.route.over ? 'text-rose-500' : 'text-stone-400'}`}>{r.route.over ? '조건보다 오래 걸려요' : '길찾기'}</span>
+                      </span>
+                    ) : r.minutes !== undefined ? (
+                      <span title="직선거리로 추정한 시간이에요">
+                        약 {fmtMin(r.minutes)}
+                        {r.pending && <span className="block animate-pulse text-[10px] text-stone-400">길찾기 중…</span>}
+                      </span>
+                    ) : (
+                      '-'
+                    )}
+                  </td>
+                )}
                 {mainCols.map((c) => (
                   <td key={c.key} className="px-2 py-2.5">
                     <VerdictBadge {...r.cells[c.key]} />
@@ -759,7 +783,7 @@ export function AvailabilityCard({ a }: { a: import('@/lib/availability').Availa
           </p>
         </div>
         <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${a.totalLeft ? 'bg-brand-600 text-white' : 'bg-rose-100 text-rose-700'}`}>
-          {a.totalLeft ? `${a.totalLeft}자리 남음` : '마감'}
+          {a.totalLeft ? `${a.totalLeft}자리 남음` : a.zones.length ? '마감' : '예약 안 받음'}
         </span>
       </div>
       <ul className="divide-y divide-stone-100">
