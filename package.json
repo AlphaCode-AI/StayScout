@@ -8,7 +8,7 @@
     "start": "NODE_EXTRA_CA_CERTS=certs/zscaler-root.pem next start",
     "sync:gocamping": "node scripts/sync-gocamping.mjs",
     "sync:all": "node scripts/sync-gocamping.mjs && node scripts/sync-extra.mjs && node scripts/sync-registry.mjs && node scripts/sync-pettour.mjs && node scripts/sync-public.mjs && node scripts/merge-public.mjs",
-    "sync:pension": "node scripts/sync-pension.mjs rural && node scripts/sync-pension.mjs tourist && node scripts/sync-pension.mjs tour && node scripts/sync-pension.mjs merge",
+    "sync:pension": "node scripts/sync-pension.mjs rural && node scripts/sync-pension.mjs tourist && node scripts/sync-pension.mjs lodging && node scripts/sync-pension.mjs geocode && node scripts/sync-pension.mjs tour && node scripts/sync-pension.mjs merge",
     "test:gocamping": "node scripts/test-gocamping.mjs"
   },
   "dependencies": {

@@ -627,6 +627,24 @@ export function DetailView({ d, onAsk }: { d: Detail; onAsk?: (t: string) => voi
   return (
     <div className="rise overflow-hidden rounded-xl border border-stone-200 bg-white">
       {images.length > 0 ? <Gallery images={images} name={d.name} /> : <Thumb className="h-32 w-full rounded-none" />}
+      {d.imageCredit && images.length > 0 && (
+        <p className="border-b border-stone-100 px-4 py-1.5 text-[11px] text-stone-400">
+          사진: {d.imageCredit.source}
+          {d.imageCredit.authors.length > 0 && ' · '}
+          {d.imageCredit.authors.map((a, i) => (
+            <span key={a.name}>
+              {i > 0 && ', '}
+              {a.uri ? (
+                <a href={a.uri} target="_blank" rel="noreferrer" className="hover:underline">
+                  {a.name}
+                </a>
+              ) : (
+                a.name
+              )}
+            </span>
+          ))}
+        </p>
+      )}
       <div className="p-4">
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-base font-semibold">{d.name}</p>
@@ -774,7 +792,7 @@ export function ExtraView({ items, wide = false }: { items: import('@/lib/types'
   return (
     <div className="space-y-3">
       <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-        <p className="font-semibold">조건을 확인하지 못한 캠핑장 {items.length}곳</p>
+        <p className="font-semibold">조건을 확인하지 못한 곳 {items.length}곳</p>
         <p className="mt-0.5 text-xs leading-relaxed text-amber-800">
           카카오맵에서만 찾은 곳이라 시설·반려견·운영 기간 정보가 없어요. 그래서 순위에는 넣지 않았어요. 전화나 지도에서 직접 확인해 주세요.
         </p>

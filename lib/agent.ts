@@ -3,7 +3,8 @@ import { canCheckLive, checkAvailability, type Availability } from './availabili
 import { EXAMPLES, PENSION_EXAMPLES } from './examples';
 import { nameCore, normName } from './names';
 import { kakaoExtras, placeNow } from './kakao';
-import { googlePlace } from './google';
+import { googlePhotoUrls, googlePlace } from './google';
+import { ogImage } from './ogimage';
 import { naverPlace } from './naver';
 import { linkAlive, naverSearch, phoneLooksValid, toUrl } from './links';
 import { applyPlaces, interpret } from './interpret';
@@ -355,6 +356,19 @@ export async function detailWithPlace(state: AgentState, index: number) {
       if (g.rating) d.detail.facts.push({ label: '구글 평점', value: `★ ${g.rating} (리뷰 ${g.reviews ?? 0}개)` });
       const tel = d.detail.facts.find((x) => x.label === '전화');
       if (tel && tel.value === '-' && g.phone) tel.value = `${g.phone} (구글 등록)`;
+      // 공공데이터에 사진이 없는 펜션은 구글 지도에 올라온 사진을 보여 줘요 (올린 사람을 같이 표시)
+      if (!d.detail.images?.length && g.photos?.length) {
+        const urls = await googlePhotoUrls(g.photos);
+        if (urls.length) {
+          d.detail.images = urls;
+          const seen = new Set<string>();
+          const authors = g.photos
+            .slice(0, urls.length)
+            .filter((p) => p.author && !seen.has(p.author) && seen.add(p.author))
+            .map((p) => ({ name: p.author!, uri: p.authorUri }));
+          d.detail.imageCredit = { source: 'Google 지도', authors };
+        }
+      }
     }
     if (!g?.website && !d.detail.links.some((l) => /예약|홈페이지/.test(l.label))) {
       const n = await naverPlace(camp);
@@ -369,6 +383,15 @@ export async function detailWithPlace(state: AgentState, index: number) {
     campImages(camp),
   ]);
   if (images.length && camp.kind !== 'pension') d.detail.images = [...new Set([camp.firstImageUrl, ...images].filter((x): x is string => !!x))].slice(0, 12);
+  // 그래도 사진이 없으면 숙소 홈페이지의 대표 이미지(링크 미리보기용 사진) 한 장을 보여 줘요
+  if (!d.detail.images?.length && !d.detail.image) {
+    const home = d.detail.links.find((l) => /홈페이지|예약/.test(l.label) && !/열리지 않음/.test(l.label))?.url;
+    const img = await ogImage(toUrl(home));
+    if (img) {
+      d.detail.images = [img];
+      d.detail.imageCredit = { source: '숙소 홈페이지', authors: [{ name: new URL(toUrl(home)!).hostname.replace(/^www\./, ''), uri: toUrl(home) }] };
+    }
+  }
   const dead = d.detail.links.filter((_, i) => alive[i] === false);
   for (const l of dead) l.label += ' (열리지 않음)';
   const f = freshness(camp);
@@ -380,7 +403,8 @@ export async function detailWithPlace(state: AgentState, index: number) {
     if (t) t.value = `${camp.tel} (자릿수가 맞지 않아요. 잘못 등록된 번호 같아요)`;
     notes.push('등록된 전화번호도 자릿수가 맞지 않아요.');
   }
-  if (!p) {
+  // 카카오맵 대조는 캠핑장만 해요 (펜션은 구글·네이버로 찾아요)
+  if (!p && camp.kind !== 'pension') {
     facts.push({ label: '카카오맵', value: '같은 위치에 등록된 장소를 찾지 못했어요' });
     if (dead.length) notes.push('카카오맵에도 등록돼 있지 않아서, 네이버 검색으로 지금 연락처를 찾아보는 게 좋겠어요.');
   }
@@ -434,8 +458,8 @@ function pensionDetail(camp: Camp, index: number): { text: string; detail: Detai
     ...(camp.checkin || camp.checkout ? [{ label: '입·퇴실', value: `${camp.checkin || '-'} / ${camp.checkout || '-'}` }] : []),
     ...(camp.parking ? [{ label: '주차', value: camp.parking }] : []),
     ...(camp.resveCl ? [{ label: '예약', value: camp.resveCl }] : []),
-    ...(camp.permitDate ? [{ label: '인허가', value: `${camp.permitDate} (${camp.tourPension ? '관광펜션업' : '농어촌민박업'}, 행정안전부)` }] : []),
-    { label: '정보 출처', value: camp.tourId ? '행정안전부 인허가 + 한국관광공사 숙박 정보' : `${camp.source || '행정안전부 인허가'} · 기본 정보만 있는 곳` },
+    ...(camp.permitDate ? [{ label: '인허가', value: `${camp.permitDate} (${camp.tourPension ? '관광펜션업' : camp.source === '숙박업' ? '숙박업' : '농어촌민박업'}, 행정안전부)` }] : []),
+    { label: '정보 출처', value: camp.tourId ? '행정안전부 인허가 + 한국관광공사 숙박 정보' : `행정안전부 인허가 · 기본 정보만 있는 곳` },
     { label: '전화', value: camp.tel || '-' },
   ];
   return {
@@ -574,7 +598,7 @@ export function missingInfo(state: AgentState, needHome: boolean, places?: Place
   }
   if (state.pet && !state.petSize) {
     return {
-      text: '강아지 크기에 따라 갈 수 있는 곳이 크게 달라져요. 소형견만 받는 캠핑장이 많거든요. 강아지는 어느 정도 크기예요?',
+      text: '강아지 크기에 따라 갈 수 있는 곳이 크게 달라져요. 소형견만 받는 곳이 많거든요. 강아지는 어느 정도 크기예요?',
       chips: ['5kg 이하 소형견', '5~10kg', '10kg 넘는 중·대형견'],
     };
   }
@@ -842,7 +866,41 @@ async function runAgentInner(text: string, prevIn: AgentState, places?: Places):
   const { runAgentLoop } = await import('./agent-loop');
   const looped = await runAgentLoop(text, prev, places);
   if (looped) return looped;
+  // Gemini를 못 쓸 때: "○○ 정보 알려줘"처럼 숙소 하나를 물으면 검색 대신 이름으로 찾아요
+  const named = await nameReply(text, prev);
+  if (named) return named;
   return runPipeline(text, prev, places);
+}
+
+// "○○ 정보 알려줘", "○○ 상세 보여줘", "○○ 어때?"
+const INFO_RE = /^(.+?)\s*(?:에\s*대한\s*|의\s*)?(?:정보|상세(?:\s*정보)?|어때|어떤\s*곳이야)\s*(?:좀\s*)?(?:알려\s*줘|알려\s*주세요|보여\s*줘|보여\s*주세요|줘)?\s*[.!?~]*$/;
+
+async function nameReply(text: string, prev: AgentState): Promise<AgentReply | null> {
+  const m = INFO_RE.exec(text.trim());
+  if (!m || nameCore(m[1]).length < 2) return null;
+  // "가평 펜션 정보"처럼 지역 + 숙소 종류뿐이면 이름이 아니라 검색이에요
+  const areas = new Set(regions().flatMap((r) => [r, r.replace(/(시|군|구)$/, '')]));
+  const generic = /^(펜션|민박|캠핑장|캠핑|글램핑|카라반|풀빌라|독채|숙소|근처|쪽|주변)$/;
+  if (m[1].trim().split(/\s+/).every((w) => areas.has(w) || Object.keys(PROVINCES).some((p) => w.startsWith(p)) || generic.test(w))) return null;
+  const found = lookupCampsByName(m[1]);
+  const trace = [{ tool: 'get_camp', label: '상세 정보 확인', reason: `"${m[1]}"을 이름으로 찾았어요` }];
+  if (found.length === 1) {
+    const camp = found[0];
+    const d = await detailWithPlace({ ...prev, lastIds: [camp.contentId] }, 1);
+    if (d) return { kind: 'detail', text: d.text.replace(/^1번 /, ''), state: prev, detail: d.detail, chips: d.chips, engine: 'agent', trace };
+  }
+  if (found.length > 1 && found.length <= 6)
+    return { kind: 'message', text: `이름이 비슷한 곳이 ${found.length}곳 있어요. 어느 곳인가요?`, state: prev, chips: found.map((c) => `${c.facltNm} (${c.sigunguNm}) 정보 알려줘`), engine: 'agent', trace };
+  if (!found.length)
+    return {
+      kind: 'message',
+      text: `"${m[1].trim()}"(이)라는 숙소를 전국 공공데이터에서 찾지 못했어요. 신고된 이름이 다르거나 신고되지 않은 곳일 수 있어요. 정확한 이름이나 지역을 알려 주시면 다시 찾아볼게요.`,
+      state: prev,
+      chips: [],
+      engine: 'agent',
+      trace,
+    };
+  return null;
 }
 
 /** 기본 파이프라인: 정해진 순서로 해석 → 되묻기 → 탐색 → 조건 완화 */

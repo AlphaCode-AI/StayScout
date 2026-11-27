@@ -22,7 +22,8 @@ import {
   searchOf,
   regions,
 } from './agent';
-import { campById, evalCond, originCoords, type Camp } from './data';
+import { campById, evalCond, loadCamps, originCoords, type Camp } from './data';
+import { nameCore } from './names';
 import { applyPlaces, mergeDelta } from './interpret';
 import { AGENT_MODELS, CATALOG, SCHEMA, dateContext, generate, type LlmResult } from './llm';
 import { parse } from './parse';
@@ -62,17 +63,17 @@ const TOOLS = [
       },
       {
         name: 'get_camp',
-        description: '캠핑장 하나의 상세 정보(사진·시설·링크)와 자주 묻는 조건 판정을 가져와서 화면 오른쪽에 상세로 보여 줘요. 결과 표에 없는 곳도 이름으로 전국에서 찾아요. 비슷한 이름이 여러 곳이면 후보 목록을 돌려줘요.',
-        parameters: { type: 'OBJECT', properties: { reason, target: { type: 'STRING', description: '어느 캠핑장인지: 결과 표 번호("3"), 방금 본 곳("current"), 또는 캠핑장 이름(지역을 알면 "이름 (시군)")' } }, required: ['target'] },
+        description: '숙소 하나의 상세 정보(사진·시설·링크)와 자주 묻는 조건 판정을 가져와서 화면 오른쪽에 상세로 보여 줘요. 결과 표에 없는 곳도 이름으로 전국에서 찾아요. 비슷한 이름이 여러 곳이면 후보 목록을 돌려줘요.',
+        parameters: { type: 'OBJECT', properties: { reason, target: { type: 'STRING', description: '어느 숙소인지: 결과 표 번호("3"), 방금 본 곳("current"), 또는 숙소 이름(지역을 알면 "이름 (시군)")' } }, required: ['target'] },
       },
       {
         name: 'check_camp',
-        description: '특정 캠핑장 하나에 대해 사용자가 물은 조건(예: 반려동물, 개인화장실, 전기, 바비큐)이 되는지 판정해요. 검색 조건은 바꾸지 않아요. "방금 본 곳 반려동물 돼?" 같은 질문에 써요.',
+        description: '특정 숙소 하나에 대해 사용자가 물은 조건(예: 반려동물, 개인화장실, 전기, 바비큐)이 되는지 판정해요. 검색 조건은 바꾸지 않아요. "방금 본 곳 반려동물 돼?" 같은 질문에 써요.',
         parameters: {
           type: 'OBJECT',
           properties: {
             reason,
-            target: { type: 'STRING', description: '어느 캠핑장인지: 결과 표 번호("3"), 방금 본 곳("current"), 또는 캠핑장 이름(지역을 알면 "이름 (시군)")' },
+            target: { type: 'STRING', description: '어느 숙소인지: 결과 표 번호("3"), 방금 본 곳("current"), 또는 숙소 이름(지역을 알면 "이름 (시군)")' },
             conditions: { type: 'ARRAY', items: { type: 'STRING' }, description: '사용자가 물은 조건을 사용자 말 그대로 짧게 (예: "반려동물", "개인화장실", "7kg 강아지")' },
           },
           required: ['target', 'conditions'],
@@ -80,18 +81,18 @@ const TOOLS = [
       },
       {
         name: 'find_similar',
-        description: '기준 캠핑장과 비슷한 곳(유형·개인화장실·입지·화로대·규모가 비슷하고 1시간 거리 안)을 찾아 결과 표로 보여 줘요. 검색 조건이 이 기준으로 바뀌어요.',
-        parameters: { type: 'OBJECT', properties: { reason, target: { type: 'STRING', description: '어느 캠핑장인지: 결과 표 번호("3"), 방금 본 곳("current"), 또는 캠핑장 이름(지역을 알면 "이름 (시군)")' } }, required: ['target'] },
+        description: '기준 숙소와 비슷한 곳(유형·개인화장실·입지·화로대·규모가 비슷하고 1시간 거리 안)을 찾아 결과 표로 보여 줘요. 검색 조건이 이 기준으로 바뀌어요.',
+        parameters: { type: 'OBJECT', properties: { reason, target: { type: 'STRING', description: '어느 숙소인지: 결과 표 번호("3"), 방금 본 곳("current"), 또는 숙소 이름(지역을 알면 "이름 (시군)")' } }, required: ['target'] },
       },
       {
         name: 'check_availability',
         description:
-          '직전 결과 표의 N번 캠핑장의 실제 빈자리를 확인해요. 지금은 캠핑톡 공공 캠핑장만 자동 확인이 되고(검색 결과의 빈자리확인가능=true), 나머지는 unsupported를 돌려줘요. 날짜가 없으면 need_date를 돌려줘요.',
+          '직전 결과 표의 N번 숙소의 실제 빈자리를 확인해요. 지금은 캠핑톡 공공 캠핑장만 자동 확인이 되고(검색 결과의 빈자리확인가능=true), 나머지는 unsupported를 돌려줘요. 날짜가 없으면 need_date를 돌려줘요.',
         parameters: { type: 'OBJECT', properties: { reason, rank: { type: 'INTEGER' } }, required: ['rank'] },
       },
       {
         name: 'draft_inquiry',
-        description: '직전 결과 표의 N번 캠핑장에 보낼 문의 메시지 초안을 써요. 확인이 필요한 조건만 물어봐요.',
+        description: '직전 결과 표의 N번 숙소에 보낼 문의 메시지 초안을 써요. 확인이 필요한 조건만 물어봐요.',
         parameters: { type: 'OBJECT', properties: { reason, rank: { type: 'INTEGER' } }, required: ['rank'] },
       },
       {
@@ -150,7 +151,7 @@ ${JSON.stringify(current)}
 1. 사용자의 말에 조건이 새로 나오거나 바뀌면 먼저 update_conditions를 불러. 바뀐 것만 넣어.
 2. 그다음 search_camps로 찾아. need_info가 오면 그 question과 options를 그대로 ask_user로 물어봐.
 3. 결과가 3곳 미만이면 suggest_relaxations를 부르고, 무엇을 풀면 몇 곳이 늘어나는지 finish에서 안내해.
-4. 특정 캠핑장 하나에 대한 말이면 검색하지 마. 정보·상세를 원하면 get_camp, 그곳에 어떤 조건이 되는지 물으면 check_camp, 비슷한 곳을 원하면 find_similar를 불러. target은 결과 표 번호, 이름, 또는 방금_본_캠핑장을 가리킬 때 "current"야. "N번에 문의/물어봐"는 draft_inquiry, "N번 빈자리/예약 가능?"은 check_availability를 부른 뒤 finish.
+4. 특정 숙소 하나(캠핑장·펜션)에 대한 말이면 검색하지 마. 이름으로 못 찾았으면 비슷한 곳을 검색하지 말고 못 찾았다고 답해(사용자가 대신 찾아 달라고 한 경우만 검색). 정보·상세를 원하면 get_camp, 그곳에 어떤 조건이 되는지 물으면 check_camp, 비슷한 곳을 원하면 find_similar를 불러. target은 결과 표 번호, 이름, 또는 방금_본_캠핑장을 가리킬 때 "current"야. "N번에 문의/물어봐"는 draft_inquiry, "N번 빈자리/예약 가능?"은 check_availability를 부른 뒤 finish.
    - finish의 suggestions에 "N번 빈자리 확인해 줘"는 빈자리확인가능=true인 곳에만 넣어. 그런 곳이 없으면 빈자리 관련 제안을 넣지 마.
    - 사용자가 번호 없이 "빈자리까지 확인해 줘"라고 하면, 검색 결과 중 빈자리확인가능=true인 곳을 골라 check_availability를 불러. 그런 곳이 없으면 자동 확인이 안 된다고 정직하게 말해.
    - 빈자리는 check_availability가 status ok를 돌려준 경우에만 "남아 있다/없다"고 말해. unsupported면 "자동으로 확인할 수 없는 예약처"라고 말하고 절대 추측하지 마.
@@ -165,7 +166,7 @@ ${JSON.stringify(current)}
 - 와이파이·전기·놀이터·반려견·입지 같은 조건은 공공데이터로 이미 확인된 거야. "확인 필요"라고 말해도 되는 건 search_camps 결과의 확인필요 목록에 있는 조건뿐이야.
 - "조용함", "사이트 간격" 같은 판단형 조건은 사이트 간 거리, 사이트 수, 입지, 소개글로 추정해. 추정_근거가 있으면 "추정"이라고 밝히고 근거를 짧게 말해. 근거가 없으면 "확인 필요"라고 정직하게 말해.
 - 사용자가 가장 강조한 조건(예: 조용함)에 대해 답변의 첫 문장에서 직접 답해.
-- 방금_본_캠핑장이 있고 사용자가 캠핑장 이름 없이 그곳의 조건을 묻는 말(어떤 말투든: "반려동물 가능해?", "화장실 있는지 확인해줘", "전기는?")은 그 캠핑장에 대한 질문이야. update_conditions나 search_camps를 부르지 말고 check_camp(target "current")로 답해.
+- 방금_본_캠핑장이 있고 사용자가 숙소 이름 없이 그곳의 조건을 묻는 말(어떤 말투든: "반려동물 가능해?", "화장실 있는지 확인해줘", "전기는?")은 그 캠핑장에 대한 질문이야. update_conditions나 search_camps를 부르지 말고 check_camp(target "current")로 답해.
 - check_camp나 get_camp로 조건을 답할 때는 판정으로 첫 문장에서 바로 답해. 추정이면 근거 문구와 함께 '추정'이라고, 확인 필요면 정직하게 모른다고 하고 전화 확인을 권해. 사용자가 이름을 정정하면(예: '포천에 있는 거') 지역을 붙인 이름으로 다시 불러.
 - get_camp 결과의 안내(링크가 열리지 않음, 전화번호 자릿수 오류, 카카오맵 이름 다름, 카카오맵 미등록)는 답변에서 빠뜨리지 말고 짧게 전해 줘.
 - top5에 예약_링크가 '열리지 않음'이면 그곳을 소개할 때 "등록된 링크가 열리지 않는다"고 한 줄 알려 줘.
@@ -220,7 +221,7 @@ function verdictsFor(camp: Camp, state: AgentState) {
 }
 
 /** target("3", "current", 이름)을 캠핑장 하나로 바꿔요 */
-function resolveCamp(target: string, state: AgentState): { camp: Camp; rank: number } | { error: string } | { 후보: string[]; 안내: string } {
+function resolveCamp(target: string, state: AgentState): { camp: Camp; rank: number } | { error: string; 비슷한_이름?: string[]; 안내?: string } | { 후보: string[]; 안내: string } {
   const t = target.trim();
   const ids = state.lastIds ?? [];
   let camp: Camp | undefined;
@@ -231,8 +232,34 @@ function resolveCamp(target: string, state: AgentState): { camp: Camp; rank: num
     if (found.length > 1) return { 후보: found.slice(0, 8).map((c) => `${c.facltNm} (${c.sigunguNm})`), 안내: '이름이 비슷한 곳이 여러 곳이에요. 사용자에게 어느 곳인지 물어봐.' };
     camp = found[0];
   }
-  if (!camp) return { error: /^\d+$/.test(t) ? '그 번호의 숙소가 없어요.' : t === 'current' ? '방금 본 캠핑장이 없어요.' : '그 이름의 캠핑장을 전국 데이터에서 찾지 못했어요.' };
+  if (!camp) {
+    if (/^\d+$/.test(t)) return { error: '그 번호의 숙소가 없어요.' };
+    if (/^(current|방금|이곳|여기)$/i.test(t)) return { error: '방금 본 숙소가 없어요.' };
+    const near = similarNames(t);
+    return {
+      error: '그 이름의 숙소를 전국 공공데이터에서 찾지 못했어요.',
+      ...(near.length ? { 비슷한_이름: near } : {}),
+      안내:
+        '조건 검색(search_camps)으로 대신 찾지 말고, 공공데이터에 없다고 답해. 신고 이름이 다르거나(숙박업으로 신고, 이름 변경) 신고되지 않은 곳일 수 있다고 짧게 덧붙이고, 비슷한_이름이 있으면 그중에 있는지 물어봐.',
+    };
+  }
   return { camp, rank: ids.indexOf(camp.contentId) + 1 };
+}
+
+/** 이름으로 못 찾았을 때 보여 줄 비슷한 이름: 3글자 이상 겹치거나, 이름 조각(띄어쓰기·& 기준)이 모두 들어 있는 곳 */
+function similarNames(target: string) {
+  const t = nameCore(target);
+  const parts = target.split(/[\s&+,·()]+/).map(nameCore).filter((x) => x.length >= 2);
+  if (t.length < 3 && parts.length < 2) return [];
+  const grams = new Set<string>();
+  for (let i = 0; i + 3 <= t.length; i++) grams.add(t.slice(i, i + 3));
+  return loadCamps()
+    .camps.filter((c) => {
+      const n = nameCore(c.facltNm);
+      return (parts.length >= 2 && parts.every((p) => n.includes(p))) || [...grams].some((g) => n.includes(g));
+    })
+    .slice(0, 5)
+    .map((c) => `${c.facltNm} (${c.sigunguNm})`);
 }
 
 /** 사용자가 물은 조건(자연어)을 규칙 해석으로 조건 키로 바꿔서 한 캠핑장에 판정해요 */
@@ -256,7 +283,7 @@ function checkConds(camp: Camp, asked: string, state: AgentState) {
 const LABEL: Record<string, string> = {
   update_conditions: '조건 정리',
   reset_conditions: '조건 초기화',
-  search_camps: '캠핑장 탐색',
+  search_camps: '숙소 탐색',
   suggest_relaxations: '조건 완화 계산',
   get_camp: '상세 정보 확인',
   check_camp: '조건 확인',
@@ -291,6 +318,7 @@ export async function runAgentLoop(text: string, prev: AgentState, places?: Plac
   let extras: ExtraPlace[] = [];
   let checked = false; // check_camp으로 한 곳의 조건만 답했어요 (검색 조건은 그대로)
   let focus: string | undefined; // 이번 턴에 이야기한 캠핑장
+  let nameMissed = false; // 이번 턴에 이름으로 찾던 숙소가 데이터에 없었어요 (그러면 조건 검색으로 넘어가지 않아요)
 
   const contents: { role: string; parts: unknown[] }[] = [{ role: 'user', parts: [{ text }] }];
   let model: (typeof AGENT_MODELS)[number] | null = null;
@@ -358,6 +386,12 @@ export async function runAgentLoop(text: string, prev: AgentState, places?: Plac
           break;
         }
         case 'search_camps': {
+          // 특정 숙소 이름을 물었는데 데이터에 없으면, 엉뚱한 추천 후보를 뽑지 않아요 (사용자가 대신 찾아 달라고 한 경우만 예외)
+          if (nameMissed && !/추천|없으면|대신|비슷한/.test(text)) {
+            result = { status: 'blocked', 안내: '사용자는 특정 숙소 하나를 물었어요. 검색하지 말고 찾지 못했다고 답해.' };
+            trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: '건너뜀 (이름으로 찾던 중)' });
+            break;
+          }
           if (!updated) {
             state = mergeDelta({ intent: 'search' }, state, rules.state, regionNames, originOk, text);
             needHome = applyPlaces(text, state, places) || needHome;
@@ -414,9 +448,12 @@ export async function runAgentLoop(text: string, prev: AgentState, places?: Plac
             const d = rank > 0 ? await detailWithPlace(state, rank) : await detailWithPlace({ ...state, lastIds: [camp.contentId] }, 1);
             detail = d ? { text: rank > 0 ? d.text : d.text.replace(/^1번 /, ''), detail: d.detail } : null;
             focus = camp.contentId;
-            result = d ? { name: d.detail.name, facts: d.detail.facts, 조건_판정: verdictsFor(camp, state), links: d.detail.links.map((l) => l.label), 안내: d.text } : { error: '상세를 만들지 못했어요.' };
-          } else result = r;
-          trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: 'camp' in r ? r.camp.facltNm : undefined });
+            result = d ? { name: d.detail.name, 주소: camp.addr1, 지역: `${camp.doNm} ${camp.sigunguNm}`, facts: d.detail.facts, 조건_판정: verdictsFor(camp, state), links: d.detail.links.map((l) => l.label), 안내: d.text } : { error: '상세를 만들지 못했어요.' };
+          } else {
+            result = r;
+            if ('비슷한_이름' in r || ('error' in r && /이름/.test(r.error))) nameMissed = true;
+          }
+          trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: 'camp' in r ? r.camp.facltNm : '찾지 못함' });
           break;
         }
         case 'check_camp': {
@@ -426,8 +463,11 @@ export async function runAgentLoop(text: string, prev: AgentState, places?: Plac
             checked = true;
             focus = r.camp.contentId;
             result = { name: r.camp.facltNm, 전화: r.camp.tel || undefined, 판정: checkConds(r.camp, asked, state) };
-          } else result = r;
-          trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: 'camp' in r ? r.camp.facltNm : undefined });
+          } else {
+            result = r;
+            if ('비슷한_이름' in r || ('error' in r && /이름/.test(r.error))) nameMissed = true;
+          }
+          trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: 'camp' in r ? r.camp.facltNm : '찾지 못함' });
           break;
         }
         case 'find_similar': {
@@ -445,8 +485,11 @@ export async function runAgentLoop(text: string, prev: AgentState, places?: Plac
               후보_전체_확인필요_포함: search.total,
               top5: search.rows.slice(0, 5).map((x) => ({ rank: x.rank, name: x.name, area: x.area, 유형: x.type, minutes: x.minutes })),
             };
-          } else result = r;
-          trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: 'camp' in r ? r.camp.facltNm : undefined });
+          } else {
+            result = r;
+            if ('비슷한_이름' in r || ('error' in r && /이름/.test(r.error))) nameMissed = true;
+          }
+          trace.push({ tool: call.name, label: LABEL[call.name], reason: why, result: 'camp' in r ? r.camp.facltNm : '찾지 못함' });
           break;
         }
         case 'check_availability': {

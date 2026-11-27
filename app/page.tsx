@@ -719,7 +719,7 @@ export default function Home() {
               {busy && (
                 <div className="flex items-center gap-3 text-sm text-stone-500">
                   <span className="h-8 w-8 rounded-full bg-brand-100" />
-                  조건을 정리하고 캠핑장을 찾는 중…
+                  조건을 정리하고 {category === 'pension' ? '펜션·민박을' : '캠핑장을'} 찾는 중…
                 </div>
               )}
               <div ref={bottom} />

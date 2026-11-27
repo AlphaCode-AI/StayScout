@@ -96,6 +96,7 @@ export interface DetailCard {
   links: { label: string; url: string }[];
   image?: string;
   images?: string[]; // 사진 여러 장 (공공데이터 캠핑장 사진 목록)
+  imageCredit?: { source: string; authors: { name: string; uri?: string }[] }; // 외부 사진 출처 (구글 사진은 올린 사람을 꼭 보여 줘야 해요)
 }
 
 export interface AgentReply {

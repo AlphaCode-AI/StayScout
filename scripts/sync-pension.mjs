@@ -2,8 +2,9 @@
  * 펜션 데이터 받기·합치기
  *   node scripts/sync-pension.mjs rural    행정안전부 농어촌민박업 인허가 (약 5.6만 건, 100건씩, 끊기면 이어 받기)
  *   node scripts/sync-pension.mjs tourist  행정안전부 관광펜션업 인허가 (약 1.7천 건)
+ *   node scripts/sync-pension.mjs lodging  행정안전부 숙박업 인허가 (호텔·모텔 포함 전체를 받고, merge에서 펜션·풀빌라 이름만 골라요)
  *   node scripts/sync-pension.mjs tour     한국관광공사 숙박 정보 중 펜션 (목록 + 소개·객실·시설, 하루 호출 한도가 있어 나눠 받기)
- *   node scripts/sync-pension.mjs merge    세 데이터를 합쳐 data/pensions.json 만들기
+ *   node scripts/sync-pension.mjs merge    네 데이터를 합쳐 data/pensions.json 만들기
  * 각 단계는 data/.cache/pension/ 에 쪽마다 저장해 두고, 다시 실행하면 받은 쪽은 건너뛰어요.
  * 인증키: .env 의 GOCAMPING_SERVICE_KEY (공공데이터포털 같은 키)
  */
@@ -55,15 +56,20 @@ async function license(name, dir) {
   }
   const pages = Math.ceil(total / 100);
   let got = 0;
-  for (let p = 1; p <= pages && timeLeft(); p++) {
-    const f = join(d, `p${p}.json`);
-    if (existsSync(f)) continue;
-    const j = await getJson(q(p));
-    const items = j?.response?.body?.items?.item;
-    if (!Array.isArray(items)) continue; // 다음 실행에서 다시 받아요
-    writeFileSync(f, JSON.stringify(items));
-    got++;
-  }
+  // 한 쪽에 100건이 최대라 쪽이 많아요(숙박업 약 600쪽). 몇 쪽씩 동시에 받아요.
+  const todo = [];
+  for (let p = 1; p <= pages; p++) if (!existsSync(join(d, `p${p}.json`))) todo.push(p);
+  const worker = async () => {
+    while (todo.length && timeLeft()) {
+      const p = todo.shift();
+      const j = await getJson(q(p));
+      const items = j?.response?.body?.items?.item;
+      if (!Array.isArray(items)) continue; // 다음 실행에서 다시 받아요
+      writeFileSync(join(d, `p${p}.json`), JSON.stringify(items));
+      got++;
+    }
+  };
+  await Promise.all(Array.from({ length: Number(process.env.CONC || 6) }, worker));
   const have = readdirSync(d).filter((x) => /^p\d+\.json$/.test(x)).length;
   console.log(`${name}: ${have}/${pages}쪽 (이번에 ${got}쪽)${have < pages ? ' → 다시 실행하면 이어 받아요' : ' 완료'}`);
 }
@@ -172,9 +178,27 @@ const areaOf = (addr) => {
 const ymd = (s) => (s || '').replace(/[^0-9-]/g, '').slice(0, 10);
 const isPensionName = (n) => /펜션|풀빌라|pension|pool\s*villa/i.test(n);
 
+// 숙박업 중 펜션으로 볼 곳: 이름에 펜션·풀빌라처럼 분명한 말이 있거나, "스테이·빌라·하우스"면서 읍·면(시골)에 있는 곳.
+// 도시의 "○○스테이"(생활숙박·호텔)는 빼요. 호텔·콘도 업태도 빼요.
+const LODGING_PENSION = /펜션|풀빌라|독채|글램핑|카라반|민박|산장|별장/;
+const LODGING_MAYBE = /스테이|빌라|하우스|stay|villa|house/i;
+const LODGING_NOT = /모텔|호텔|여관|여인숙|게스트\s*하우스|호스텔|레지던스|비즈니스|무인텔|hotel|motel/i;
+const LODGING_TYPES = /숙박업\(생활\)|숙박업 기타|여관업|여인숙업/;
+const isRural = (addr) => /\S+[읍면]\s/.test(addr || '');
+const lodgingPension = (x) => {
+  const n = x.BPLC_NM || '', addr = x.ROAD_NM_ADDR || x.LOTNO_ADDR || '';
+  if (!LODGING_TYPES.test(x.BZSTAT_SE_NM || '') || LODGING_NOT.test(n)) return false;
+  return LODGING_PENSION.test(n) || (LODGING_MAYBE.test(n) && isRural(addr));
+};
+
+// 인허가에 좌표가 없는 곳은 geocode 단계에서 카카오로 주소를 좌표로 바꿔 둬요
+const GEO_FILE = join(CACHE, 'geo.json');
+const geo = existsSync(GEO_FILE) ? JSON.parse(readFileSync(GEO_FILE, 'utf8')) : {};
+const cleanAddr = (a) => (a || '').split(',')[0].replace(/\s+\d+동\(.*$/, '').replace(/\s*\(.*\)\s*$/, '').trim();
+
 function fromLicense(x, source) {
-  const coords = toWgs(x.CRD_INFO_X, x.CRD_INFO_Y);
   const addr = (x.ROAD_NM_ADDR || x.LOTNO_ADDR || '').split(',')[0].trim();
+  const coords = toWgs(x.CRD_INFO_X, x.CRD_INFO_Y) || geo[cleanAddr(x.ROAD_NM_ADDR)] || geo[cleanAddr(x.LOTNO_ADDR)] || null;
   return {
     contentId: `pen-${x.OPN_ATMY_GRP_CD}-${x.MNG_NO}`, // 관리번호는 지자체마다 겹칠 수 있어서 지자체 코드를 붙여요
     kind: 'pension',
@@ -184,21 +208,57 @@ function fromLicense(x, source) {
     mapY: coords ? coords[0].toFixed(6) : '',
     mapX: coords ? coords[1].toFixed(6) : '',
     tel: (x.TELNO || '').trim(),
-    roomCount: Number(x.GSRM_CNT) || undefined,
+    roomCount: Number(x.GSRM_CNT) || Number(x.KSRM_CNT) + Number(x.WSRM_CNT) || undefined, // 숙박업은 한실·양실 수
     permitDate: ymd(x.LCPMT_YMD),
     source,
     tourPension: source === '관광펜션업',
-    pensionType: source === '관광펜션업' || isPensionName(x.BPLC_NM) ? '펜션' : '민박',
-    induty: source === '관광펜션업' ? '관광펜션' : '농어촌민박',
+    pensionType: source !== '농어촌민박업' || isPensionName(x.BPLC_NM) ? '펜션' : '민박',
+    induty: source === '관광펜션업' ? '관광펜션' : source === '숙박업' ? '숙박업' : '농어촌민박',
     manageSttus: '운영',
   };
+}
+
+// ---------------------------------------------------------------- 좌표 없는 곳 (카카오 주소 검색)
+async function geocode() {
+  const KAKAO = process.env.KAKAO_REST_API_KEY || env.KAKAO_REST_API_KEY;
+  if (!KAKAO) throw new Error('.env에 KAKAO_REST_API_KEY가 필요해요');
+  const open = (x) => /영업|정상/.test(x.SALS_STTS_NM || '') && !/폐업|휴업|취소|말소/.test(x.SALS_STTS_NM || '');
+  const need = [...readPages('rural'), ...readPages('tourist'), ...readPages('lodging').filter(lodgingPension)]
+    .filter((x) => open(x) && !toWgs(x.CRD_INFO_X, x.CRD_INFO_Y))
+    .map((x) => cleanAddr(x.ROAD_NM_ADDR) || cleanAddr(x.LOTNO_ADDR))
+    .filter((a) => a && !(a in geo));
+  const todo = [...new Set(need)];
+  let found = 0, done = 0;
+  const worker = async () => {
+    while (todo.length && timeLeft()) {
+      const a = todo.shift();
+      try {
+        const r = await fetch(`https://dapi.kakao.com/v2/local/search/address.json?query=${encodeURIComponent(a)}`, { headers: { Authorization: `KakaoAK ${KAKAO}` }, signal: AbortSignal.timeout(10_000) });
+        if (!r.ok) continue;
+        const d = (await r.json()).documents?.[0];
+        geo[a] = d ? [Number(d.y), Number(d.x)] : null;
+        if (d) found++;
+        done++;
+      } catch {
+        // 다음 실행에서 다시
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 8 }, worker));
+  writeFileSync(GEO_FILE, JSON.stringify(geo));
+  console.log(`주소 → 좌표: 이번에 ${done}곳 조회, ${found}곳 찾음 · 남은 주소 ${todo.length}`);
 }
 
 function merge() {
   const open = (x) => /영업|정상/.test(x.SALS_STTS_NM || '') && !/폐업|휴업|취소|말소/.test(x.SALS_STTS_NM || '');
   const rural = readPages('rural').filter(open).map((x) => fromLicense(x, '농어촌민박업'));
   const tourist = readPages('tourist').filter(open).map((x) => fromLicense(x, '관광펜션업'));
-  console.log(`영업 중: 농어촌민박 ${rural.length} · 관광펜션 ${tourist.length}`);
+  // 숙박업: 객실이 많은 단지형 펜션·풀빌라는 농어촌민박이 아니라 숙박업으로 신고해요. 호텔·모텔은 빼고 펜션식 이름만.
+  const lodging = readPages('lodging')
+    .filter(open)
+    .filter(lodgingPension)
+    .map((x) => fromLicense(x, '숙박업'));
+  console.log(`영업 중: 농어촌민박 ${rural.length} · 관광펜션 ${tourist.length} · 숙박업 중 펜션식 이름 ${lodging.length}`);
 
   // 같은 곳 찾기용 격자 (약 1km)
   const grid = new Map();
@@ -243,6 +303,12 @@ function merge() {
     } else add(p);
   }
   console.log(`관광펜션 중 농어촌민박과 같은 곳 ${both}곳 (관광펜션 지정 표시)`);
+  let lodgingSame = 0;
+  for (const p of lodging) {
+    if (findSame(p.facltNm, p.addr1, +p.mapY, +p.mapX)) lodgingSame++;
+    else add(p);
+  }
+  console.log(`숙박업 펜션 중 이미 있는 곳 ${lodgingSame}곳 · 새로 추가 ${lodging.length - lodgingSame}곳`);
 
   // 관광공사 상세
   const td = join(CACHE, 'tour');
@@ -333,6 +399,8 @@ const step = process.argv[2];
 if (!KEY && step !== 'merge') throw new Error('.env에 GOCAMPING_SERVICE_KEY가 필요해요');
 if (step === 'rural') await license('rural_homestays', 'rural');
 else if (step === 'tourist') await license('tourist_pensions', 'tourist');
+else if (step === 'lodging') await license('lodgings', 'lodging');
+else if (step === 'geocode') await geocode();
 else if (step === 'tour') await tour();
 else if (step === 'merge') merge();
-else console.log('사용법: node scripts/sync-pension.mjs rural|tourist|tour|merge');
+else console.log('사용법: node scripts/sync-pension.mjs rural|tourist|lodging|geocode|tour|merge');

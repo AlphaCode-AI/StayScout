@@ -15,10 +15,14 @@ export interface GooglePlace {
   reviews?: number;
   phone?: string;
   mapsUrl?: string;
+  /** 사진 이름(사진 주소를 받을 때 써요)과 올린 사람 — 화면에 출처로 같이 보여 줘야 해요 */
+  photos?: { name: string; author?: string; authorUri?: string }[];
 }
 
 const cache = dayCache<GooglePlace | null>();
 const quota = dailyQuota('GOOGLE_DAILY_LIMIT', 30);
+const photoCache = dayCache<string | null>();
+const photoQuota = dailyQuota('GOOGLE_PHOTO_DAILY_LIMIT', 30);
 
 const DEG = Math.PI / 180;
 function dist(a: [number, number], b: [number, number]) {
@@ -30,7 +34,7 @@ function dist(a: [number, number], b: [number, number]) {
 export async function googlePlace(c: Camp): Promise<GooglePlace | null> {
   const key = process.env.GOOGLE_PLACES_API_KEY;
   if (!key || !Number(c.mapY)) return null;
-  const hit = cache.get(c.contentId);
+  const hit = cache.get(`v3:${c.contentId}`);
   if (hit) return hit.v;
   if (!quota.take()) return null; // 오늘 한도: 저장하지 않고 다음에 다시
   try {
@@ -39,7 +43,7 @@ export async function googlePlace(c: Camp): Promise<GooglePlace | null> {
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': key,
-        'X-Goog-FieldMask': 'places.displayName,places.websiteUri,places.rating,places.userRatingCount,places.nationalPhoneNumber,places.location,places.googleMapsUri',
+        'X-Goog-FieldMask': 'places.displayName,places.websiteUri,places.rating,places.userRatingCount,places.nationalPhoneNumber,places.location,places.googleMapsUri,places.photos',
       },
       body: JSON.stringify({
         textQuery: `${c.facltNm} ${c.sigunguNm}`,
@@ -51,7 +55,18 @@ export async function googlePlace(c: Camp): Promise<GooglePlace | null> {
       signal: AbortSignal.timeout(8000),
     });
     if (!r.ok) return null; // 오류는 저장하지 않아요
-    const j = (await r.json()) as { places?: { displayName?: { text: string }; websiteUri?: string; rating?: number; userRatingCount?: number; nationalPhoneNumber?: string; location?: { latitude: number; longitude: number }; googleMapsUri?: string }[] };
+    const j = (await r.json()) as {
+      places?: {
+        displayName?: { text: string };
+        websiteUri?: string;
+        rating?: number;
+        userRatingCount?: number;
+        nationalPhoneNumber?: string;
+        location?: { latitude: number; longitude: number };
+        googleMapsUri?: string;
+        photos?: { name: string; authorAttributions?: { displayName?: string; uri?: string }[] }[];
+      }[];
+    };
     const here: [number, number] = [Number(c.mapY), Number(c.mapX)];
     // 같은 위치 후보 중 이름이 비슷하고 홈페이지·평점이 있는 곳을 먼저 골라요
     const cands = (j.places ?? [])
@@ -72,11 +87,39 @@ export async function googlePlace(c: Camp): Promise<GooglePlace | null> {
           reviews: best.userRatingCount,
           phone: best.nationalPhoneNumber,
           mapsUrl: best.googleMapsUri?.replace(/&g_mp=.*$/, ''),
+          photos: (best.photos ?? []).slice(0, 5).map((p) => ({ name: p.name, author: p.authorAttributions?.[0]?.displayName, authorUri: p.authorAttributions?.[0]?.uri })),
         }
       : null;
-    cache.set(c.contentId, v);
+    cache.set(`v3:${c.contentId}`, v);
     return v;
   } catch {
     return null;
   }
+}
+
+/**
+ * 구글 장소 사진의 주소. 상세 보기에서 사진이 없는 펜션에만 써요.
+ * 사진 요청은 따로 세는 항목(Place Details Photos, 월 1,000건 무료)이라 하루 GOOGLE_PHOTO_DAILY_LIMIT(기본 30)장으로 막아요.
+ * 사진 파일은 저장하지 않고, 구글이 주는 주소(키가 들어 있지 않음)만 하루 기억해요.
+ */
+export async function googlePhotoUrls(photos: NonNullable<GooglePlace['photos']>, max = 5): Promise<string[]> {
+  const key = process.env.GOOGLE_PLACES_API_KEY;
+  if (!key) return [];
+  const urls = await Promise.all(
+    photos.slice(0, max).map(async (p) => {
+      const hit = photoCache.get(p.name);
+      if (hit) return hit.v;
+      if (!photoQuota.take()) return null;
+      try {
+        const r = await fetch(`https://places.googleapis.com/v1/${p.name}/media?maxWidthPx=1200&skipHttpRedirect=true`, { headers: { 'X-Goog-Api-Key': key }, signal: AbortSignal.timeout(8000) });
+        if (!r.ok) return null;
+        const u = ((await r.json()) as { photoUri?: string }).photoUri ?? null;
+        photoCache.set(p.name, u);
+        return u;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return urls.filter((u): u is string => !!u);
 }
