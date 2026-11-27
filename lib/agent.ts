@@ -1,6 +1,7 @@
-import { CATEGORY_LABEL, SLOT_LABEL, ORIGINS, PROVINCES, categoryOf, estimateMinutes, evalCond, loadCamps, licenseClosed, loadPetInfo, maxPeople, minPrice, noKidsQuote, originCoords, siteMix, type Camp } from './data';
+import { CATEGORY_LABEL, SLOT_LABEL, ORIGINS, PROVINCES, campById, categoryOf, estimateMinutes, evalCond, loadCamps, licenseClosed, loadPetInfo, maxPeople, minPrice, noKidsQuote, originCoords, siteMix, type Camp } from './data';
 import { canCheckLive, checkAvailability, type Availability } from './availability';
-import { EXAMPLES } from './examples';
+import { EXAMPLES, PENSION_EXAMPLES } from './examples';
+import { nameCore, normName } from './names';
 import { kakaoExtras, placeNow } from './kakao';
 import { googlePlace } from './google';
 import { naverPlace } from './naver';
@@ -9,6 +10,18 @@ import { applyPlaces, interpret } from './interpret';
 import { normalizeCategory, parse } from './parse';
 import { applyProfile, type Profile } from './profile';
 import type { AgentReply, AgentState, Column, DetailCard, Dropped, Places, Relax, Row, Stage } from './types';
+
+/** 결과 표의 예약 칸: 예약 방식과 링크 */
+function reserveOf(c: Camp): Row['reserve'] {
+  const url = toUrl(c.resveUrl) || toUrl(c.homepage);
+  const mode =
+    c.kind === 'pension'
+      ? url
+        ? '홈페이지'
+        : (c.resveCl || '').replace(/^가능\s*\(?/, '').replace(/\)\s*$/, '').split(',').slice(0, 2).join('·') || '정보 없음'
+      : reserveMode(c.resveCl);
+  return { mode, url };
+}
 
 function reserveMode(cl: string) {
   if (!cl) return '정보 없음';
@@ -25,7 +38,8 @@ export function typesOf(s: AgentState) {
   return s.conds.filter((c) => c.key.startsWith('induty:')).map((c) => c.key.slice(7));
 }
 
-function regions() {
+/** 지역(시·군·구) 이름 목록 — 한 번 만들고 다시 써요 */
+export function regions() {
   if (!regionNames) regionNames = [...new Set(loadCamps().camps.map((c) => c.sigunguNm).filter(Boolean))];
   return regionNames;
 }
@@ -241,8 +255,7 @@ export { describe };
 // ---------------------------------------------------------------------------
 
 export function campByRank(state: AgentState, index: number) {
-  const id = state.lastIds?.[index - 1];
-  return loadCamps().camps.find((c) => c.contentId === id);
+  return campById(state.lastIds?.[index - 1]);
 }
 
 /** 고캠핑 갱신일. 1년이 넘으면 예약 링크·이름이 바뀌었을 수 있어서 표시해요. */
@@ -273,26 +286,32 @@ async function campImages(c: Camp): Promise<string[]> {
   }
 }
 
-/** 상위 몇 곳을 카카오맵과 맞춰 지금 이름·전화를 붙여요. 실패하면 그대로 둬요. */
 /** 결과를 먼저 보여 주고, 상위 10곳의 링크·평점·카카오맵 정보는 화면이 /api/enrich로 뒤에 채워요 */
 export function markPending(rows: Row[]) {
   for (const r of rows.slice(0, 10)) r.pending = true;
   return rows;
 }
 
-/** /api/enrich: 상위 곳들의 카카오맵·구글·네이버 정보와 링크 확인 결과 */
-export async function enrichRows(items: { id: string; url?: string; mode?: string }[]) {
-  const rows = items.slice(0, 10).map((x, i) => ({ id: x.id, rank: i + 1, reserve: { mode: x.mode ?? '', url: x.url } }) as unknown as Row);
+/**
+ * /api/enrich: 상위 곳들의 카카오맵·구글·네이버 정보와 링크 확인 결과.
+ * 화면에서는 숙소 id만 받고, 확인할 링크는 서버가 숙소 데이터에서 직접 찾아요 (아무 주소나 서버가 열지 않게).
+ */
+export async function enrichRows(ids: string[]) {
+  const rows = ids
+    .slice(0, 10)
+    .map((id) => campById(id))
+    .filter((c): c is Camp => !!c)
+    .map((c, i) => ({ id: c.contentId, rank: i + 1, reserve: reserveOf(c) }) as unknown as Row);
   await attachPlaces(rows);
   return rows.map((r) => ({ id: r.id, place: r.place, google: r.google, naver: r.naver, reserve: r.reserve }));
 }
 
-export async function attachPlaces(rows: Row[], n = 5) {
-  const camps = loadCamps().camps;
+/** 상위 곳에 구글·네이버 링크·평점(펜션)과 카카오맵 지금 이름·전화(캠핑장), 링크 열림 여부를 붙여요. 실패하면 그대로 둬요. */
+async function attachPlaces(rows: Row[], checkTop = 5) {
   // 펜션은 홈페이지가 거의 없어서 상위 10곳은 구글에 등록된 홈페이지·평점을 찾아 붙여요
   await Promise.all(
     rows.slice(0, 10).map(async (r) => {
-      const c = camps.find((x) => x.contentId === r.id);
+      const c = campById(r.id);
       if (c?.kind !== 'pension') return;
       const g = await googlePlace(c);
       if (g) r.google = { website: g.website, rating: g.rating, reviews: g.reviews, phone: g.phone, mapsUrl: g.mapsUrl };
@@ -302,18 +321,18 @@ export async function attachPlaces(rows: Row[], n = 5) {
       }
       // 구글에도 링크가 없으면 네이버에 등록된 링크(홈페이지·블로그·인스타그램·예약)를 찾아요
       if (!r.reserve.url) {
-        const n = await naverPlace(c);
-        if (n) r.naver = { link: n.link, linkKind: n.linkKind, phone: n.phone };
-        if (n?.link) {
-          r.reserve.url = n.link;
-          r.reserve.mode = n.linkKind || '홈페이지';
+        const nv = await naverPlace(c);
+        if (nv) r.naver = { link: nv.link, linkKind: nv.linkKind, phone: nv.phone };
+        if (nv?.link) {
+          r.reserve.url = nv.link;
+          r.reserve.mode = nv.linkKind || '홈페이지';
         }
       }
     }),
   );
   await Promise.all(
-    rows.slice(0, n).map(async (r) => {
-      const c = camps.find((x) => x.contentId === r.id);
+    rows.slice(0, checkTop).map(async (r) => {
+      const c = campById(r.id);
       const [p, alive] = await Promise.all([c && c.kind !== 'pension' ? placeNow(c) : null, linkAlive(r.reserve.url)]);
       if (p) r.place = p;
       if (alive === false) r.reserve.dead = true;
@@ -595,15 +614,7 @@ export function searchOf(state: AgentState) {
     minutes: minutes.get(c.contentId),
     inRegion: state.regions.length ? inRegion(c, state.regions) : false,
     cells: Object.fromEntries(columns.map((col) => [col.key, evalCond(col.key, c, state.petSize, typesOf(state))])),
-    reserve: {
-      mode:
-        c.kind === 'pension'
-          ? toUrl(c.resveUrl) || toUrl(c.homepage)
-            ? '홈페이지'
-            : (c.resveCl || '').replace(/^가능\s*\(?/, '').replace(/\)\s*$/, '').split(',').slice(0, 2).join('·') || '정보 없음'
-          : reserveMode(c.resveCl),
-      url: toUrl(c.resveUrl) || toUrl(c.homepage),
-    },
+    reserve: reserveOf(c),
     liveCheck: canCheckLive(c),
     extraSource: c.source,
     ...freshness(c),
@@ -617,7 +628,7 @@ export function searchOf(state: AgentState) {
   const dropped: Dropped[] = prevIds
     .filter((id) => !now.has(id))
     .map((id) => {
-      const c = camps.find((x) => x.contentId === id);
+      const c = campById(id);
       if (!c) return null;
       const out = sets.find((st) => !st.ids.has(id));
       if (out) {
@@ -737,31 +748,29 @@ const DETAIL_RE = /^(\d+)번 자세히 보기$/;
 // 상세의 "비슷한 곳 찾기" 버튼이 보내는 문장: "이름 (시군)과 비슷한 곳 찾아줘"
 const SIMILAR_RE = /^(.+ \([^)]+\))(?:과|와) 비슷한 곳 찾아줘$/;
 
-const norm = (x: string) => x.replace(/\(주\)|주식회사/g, '').toLowerCase().replace(/[\s&·.,()\[\]'"!?~\-_/]/g, '');
 
 /** 이름으로 캠핑장 찾기 (띄어쓰기·기호 무시). 정확히 같은 이름이 있으면 그것만, 없으면 이름에 포함되는 곳들 */
 export function lookupCampsByName(name: string, area?: string): Camp[] {
-  const target = norm(name.replace(/\(([^)]+)\)/, ''));
+  const target = normName(name.replace(/\(([^)]+)\)/, ''));
   area = area || name.match(/\(([^)]+)\)/)?.[1]?.trim();
   if (target.length < 3) return [];
   const camps = loadCamps().camps.filter((c) => !licenseClosed(c) && (!area || c.sigunguNm === area || c.sigunguNm.startsWith(area)));
-  const exact = camps.filter((c) => norm(c.facltNm) === target);
+  const exact = camps.filter((c) => normName(c.facltNm) === target);
   if (exact.length) return exact;
   // "캠핑장·야영장·글램핑" 같은 꼬리말은 빼고 이름 핵심끼리 비교해요.
   // (예: "다올숲 캠핑장" → 다올숲. 꼬리말만 겹치는 "숲캠핑장"이 걸리지 않게)
-  const t = core(target);
+  const t = nameCore(target);
   if (t.length < 2) return [];
-  const same = camps.filter((c) => core(norm(c.facltNm)) === t);
+  const same = camps.filter((c) => nameCore(c.facltNm) === t);
   if (same.length) return same;
-  const within = camps.filter((c) => core(norm(c.facltNm)).includes(t));
+  const within = camps.filter((c) => nameCore(c.facltNm).includes(t));
   if (within.length) return within;
   // 사용자가 이름 뒤에 다른 말을 붙였을 때 (예: "하조대캠핑카예약")
   return camps.filter((c) => {
-    const n = core(norm(c.facltNm));
+    const n = nameCore(c.facltNm);
     return n.length >= 3 && t.startsWith(n);
   });
 }
-const core = (n: string) => n.replace(/(오토캠핑장|캠핑장|캠핑|야영장|글램핑장|글램핑|캠프|캠핑파크)$/, '');
 
 async function runAgentInner(text: string, prevIn: AgentState, places?: Places): Promise<AgentReply> {
   // 직전에 "어느 날짜 빈자리?"를 물었고 이번 답에 날짜가 있으면, 새 검색이 아니라 그 빈자리 확인을 이어가요.
@@ -844,7 +853,7 @@ export async function runPipeline(text: string, prev: AgentState, places?: Place
 
   for (const cmd of commands) {
     if (cmd.type === 'reset') {
-      return done({ kind: 'message', text: '좋아요, 처음부터 다시 찾을게요. 원하는 조건을 편하게 말해 주세요.', state, chips: EXAMPLES });
+      return done({ kind: 'message', text: '좋아요, 처음부터 다시 찾을게요. 원하는 조건을 편하게 말해 주세요.', state, chips: state.category === 'pension' ? PENSION_EXAMPLES : EXAMPLES });
     }
     if (cmd.type === 'availability') {
       const a = await availabilityOf(state, cmd.index);

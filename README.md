@@ -82,6 +82,7 @@ lib/
   kakao.ts        카카오맵 이름 변경 대조
   google.ts       구글 Places로 펜션 홈페이지·평점 찾기
   naver.ts        네이버 지역 검색으로 펜션 링크 찾기
+  names.ts        숙소 이름 비교, 외부 API 하루 한도(한국 날짜 기준)·하루 캐시
   links.ts        링크 열림 확인, 전화번호 형식 확인
   profile.ts      내 정보(인원·반려견·카테고리별 늘 원하는 조건)를 검색 조건에 반영
   examples.ts     첫 화면 예시 문장 (캠핑장·펜션 따로)
@@ -94,7 +95,7 @@ app/
   home-modal.tsx     우리 집(동 단위) 설정
   history.ts         대화 기록·내 정보 브라우저 저장
   api/search         검색 API (결과를 먼저 보냄)
-  api/enrich         상위 10곳 링크·평점 채우기
+  api/enrich         상위 10곳 링크·평점 채우기 (숙소 id만 받음)
   api/geocode        주소 검색 API
 ```
 

@@ -2,10 +2,11 @@
  * 구글 Places API (New): 펜션의 공식 홈페이지·평점·전화를 찾아요.
  * - 검색 결과 상위 곳만 그때그때 찾아요. 구글 약관상 장소 정보는 오래 저장할 수 없어서
  *   서버 메모리에 하루만 두고(같은 곳을 다시 볼 때 호출을 아끼려고), 파일로는 저장하지 않아요.
- * - 무료 사용량(월 1,000건) 안에서 쓰도록 하루 호출 수를 GOOGLE_DAILY_LIMIT(기본 30)로 막아요.
- * - 같은 위치(약 300m)에 있는 장소만 같은 곳으로 봐요. 이름만 비슷한 다른 지역 펜션이 붙지 않게.
+ * - 무료 사용량(월 1,000건) 안에서 쓰도록 하루 호출 수를 GOOGLE_DAILY_LIMIT(기본 30)로 막아요. 한국 날짜 기준으로 세요.
+ * - 약 300m 안이거나, 1.5km 안이면서 이름이 같은(한쪽이 다른 쪽에 들어 있는) 장소만 같은 곳으로 봐요.
  */
 import type { Camp } from './data';
+import { dailyQuota, dayCache, sameName } from './names';
 
 export interface GooglePlace {
   name: string;
@@ -16,10 +17,8 @@ export interface GooglePlace {
   mapsUrl?: string;
 }
 
-const mem = new Map<string, { at: number; v: GooglePlace | null }>();
-const TTL = 24 * 3600_000;
-let day = '';
-let used = 0;
+const cache = dayCache<GooglePlace | null>();
+const quota = dailyQuota('GOOGLE_DAILY_LIMIT', 30);
 
 const DEG = Math.PI / 180;
 function dist(a: [number, number], b: [number, number]) {
@@ -27,20 +26,13 @@ function dist(a: [number, number], b: [number, number]) {
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * DEG) * Math.cos(b[0] * DEG) * Math.sin(dLon / 2) ** 2;
   return 2 * 6371000 * Math.asin(Math.sqrt(h));
 }
-const core = (s: string) => s.toLowerCase().replace(/[\s&·.,()[\]'"!?~\-_/]/g, '').replace(/(펜션|풀빌라|민박|스테이)$/, '');
 
 export async function googlePlace(c: Camp): Promise<GooglePlace | null> {
   const key = process.env.GOOGLE_PLACES_API_KEY;
   if (!key || !Number(c.mapY)) return null;
-  const hitMem = mem.get(`v2:${c.contentId}`);
-  if (hitMem && Date.now() - hitMem.at < TTL) return hitMem.v;
-  const today = new Date().toISOString().slice(0, 10);
-  if (today !== day) {
-    day = today;
-    used = 0;
-  }
-  if (used >= Number(process.env.GOOGLE_DAILY_LIMIT || 30)) return null; // 오늘 한도: 저장하지 않고 다음에 다시
-  used++;
+  const hit = cache.get(c.contentId);
+  if (hit) return hit.v;
+  if (!quota.take()) return null; // 오늘 한도: 저장하지 않고 다음에 다시
   try {
     const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
@@ -66,24 +58,23 @@ export async function googlePlace(c: Camp): Promise<GooglePlace | null> {
       .filter((p) => p.location)
       .map((p) => {
         const d = dist(here, [p.location!.latitude, p.location!.longitude]);
-        const a = core(c.facltNm), b = core(p.displayName?.text || '');
-        const similar = !!a && !!b && (a.includes(b) || b.includes(a) || a.slice(0, 2) === b.slice(0, 2));
+        const similar = sameName(c.facltNm, p.displayName?.text || '');
         return { p, ok: d < 300 || (d < 1500 && similar), score: (similar ? 4 : 0) + (p.websiteUri ? 2 : 0) + (p.userRatingCount ? 1 : 0) - d / 1000 };
       })
       .filter((x) => x.ok)
       .sort((x, y) => y.score - x.score);
-    const hit = cands[0]?.p;
-    const v: GooglePlace | null = hit
+    const best = cands[0]?.p;
+    const v: GooglePlace | null = best
       ? {
-          name: hit.displayName?.text || '',
-          website: hit.websiteUri,
-          rating: hit.rating,
-          reviews: hit.userRatingCount,
-          phone: hit.nationalPhoneNumber,
-          mapsUrl: hit.googleMapsUri?.replace(/&g_mp=.*$/, ''),
+          name: best.displayName?.text || '',
+          website: best.websiteUri,
+          rating: best.rating,
+          reviews: best.userRatingCount,
+          phone: best.nationalPhoneNumber,
+          mapsUrl: best.googleMapsUri?.replace(/&g_mp=.*$/, ''),
         }
       : null;
-    mem.set(`v2:${c.contentId}`, { at: Date.now(), v });
+    cache.set(c.contentId, v);
     return v;
   } catch {
     return null;

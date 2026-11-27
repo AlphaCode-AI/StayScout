@@ -52,69 +52,6 @@ function DiffLine({ cur, prev }: { cur: AgentReply; prev?: AgentReply }) {
   );
 }
 
-/** 채팅에 남는 결과 요약 카드. 누르면 오른쪽 패널(휴대폰은 아래 시트)에 그 시점 결과가 열려요. */
-export function ResultSummary({ reply, prev, active, onOpen }: { reply: AgentReply; prev?: AgentReply; active: boolean; onOpen: () => void }) {
-  const rows = reply.rows ?? [];
-  const ch = rankChanges(reply, prev);
-  const d = condDiff(reply, prev);
-  return (
-    <button
-      onClick={onOpen}
-      className={`rise block w-full rounded-xl border bg-white px-4 py-3 text-left transition hover:border-brand-500 ${active ? 'border-brand-500 ring-2 ring-brand-100' : 'border-stone-200'}`}
-    >
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-semibold text-stone-800">
-          추천 {rows.length}곳 <span className="font-normal text-stone-500">/ 후보 {(reply.total ?? 0).toLocaleString()}곳</span>
-        </p>
-        <span className="shrink-0 text-xs font-medium text-brand-700">{active ? '보는 중' : '결과 보기 →'}</span>
-      </div>
-      {d && (
-        <p className="mt-1 text-xs text-stone-500">
-          {[...d.added.map((x) => `+${x}`), ...d.removed.map((x) => `−${x}`)].join(' · ')}
-        </p>
-      )}
-      <ol className="mt-2 space-y-0.5 text-sm text-stone-700">
-        {rows.slice(0, 3).map((r) => {
-          const c = ch?.[r.id];
-          return (
-            <li key={r.id} className="truncate">
-              <span className="mr-1.5 text-stone-400 tabular-nums">{r.rank}</span>
-              {r.name}
-              <span className="ml-1 text-xs text-stone-400">{r.area}</span>
-              {c === 'new' && <span className="ml-1 text-[10px] font-semibold text-amber-700">NEW</span>}
-              {typeof c === 'number' && c > 0 && <span className="ml-1 text-[10px] font-semibold text-brand-700">▲{c}</span>}
-              {typeof c === 'number' && c < 0 && <span className="ml-1 text-[10px] font-semibold text-rose-600">▼{-c}</span>}
-            </li>
-          );
-        })}
-      </ol>
-    </button>
-  );
-}
-
-/** 채팅에 남는 상세 요약 카드 */
-export function DetailSummary({ reply, active, onOpen }: { reply: AgentReply; active: boolean; onOpen: () => void }) {
-  const d = reply.detail!;
-  return (
-    <button
-      onClick={onOpen}
-      className={`rise flex w-full items-center gap-3 rounded-xl border bg-white p-2.5 text-left transition hover:border-brand-500 ${active ? 'border-brand-500 ring-2 ring-brand-100' : 'border-stone-200'}`}
-    >
-      {d.image ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={d.image} alt="" className="h-12 w-16 shrink-0 rounded-md object-cover" />
-      ) : (
-        <span className="h-12 w-16 shrink-0 rounded-md bg-brand-50" />
-      )}
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-semibold text-stone-800">{d.name}</span>
-        <span className="block truncate text-xs text-stone-500">{d.address}</span>
-      </span>
-      <span className="shrink-0 pr-1 text-xs font-medium text-brand-700">{active ? '보는 중' : '상세 보기 →'}</span>
-    </button>
-  );
-}
-
 export type PanelTab = 'results' | 'detail' | 'extras';
 
 export function ResultPanel({
@@ -252,7 +189,6 @@ export function ResultPanel({
           <ResultTable
             columns={result.columns}
             rows={result.rows}
-            total={result.total ?? 0}
             onAsk={onAsk}
             layout={roomy ? 'table' : 'cards'}
             fill
@@ -286,7 +222,6 @@ export function ResultPanel({
             <ResultTable
               columns={result.columns}
               rows={result.rows}
-              total={result.total ?? 0}
               onAsk={onAsk}
               layout={roomy ? 'table' : 'cards'}
               changes={rankChanges(result, prev)}

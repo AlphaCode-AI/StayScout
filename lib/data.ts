@@ -111,15 +111,19 @@ export function licenseClosed(c: Camp) {
   return !!c.license && !/영업중|정상/.test(c.license.status);
 }
 
-let cache: { camps: Camp[]; syncedAt: string } | null = null;
+let cache: { camps: Camp[]; byId: Map<string, Camp>; syncedAt: string } | null = null;
 
 /** scripts/sync-gocamping.mjs 로 받아 둔 고캠핑 캐시를 읽어요. */
 let cacheStamp = '';
+let checkedAt = 0;
 export function loadCamps() {
-  // data/ 파일을 다시 받으면(sync) 서버를 재시작하지 않아도 새로 읽어요
-  const stamp = ['camps.json', 'pensions.json'].map((f) => { try { return statSync(join(process.cwd(), 'data', f)).mtimeMs; } catch { return 0; } }).join(':');
-  if (cache && stamp !== cacheStamp) cache = null;
-  cacheStamp = stamp;
+  // data/ 파일을 다시 받으면(sync) 서버를 재시작하지 않아도 새로 읽어요. 파일 확인은 5초에 한 번만.
+  if (!cache || Date.now() - checkedAt > 5000) {
+    checkedAt = Date.now();
+    const stamp = ['camps.json', 'pensions.json'].map((f) => { try { return statSync(join(process.cwd(), 'data', f)).mtimeMs; } catch { return 0; } }).join(':');
+    if (cache && stamp !== cacheStamp) cache = null;
+    cacheStamp = stamp;
+  }
   if (!cache) {
     const raw = JSON.parse(readFileSync(join(process.cwd(), 'data', 'camps.json'), 'utf8'));
     const camps = raw.camps as Camp[];
@@ -129,9 +133,14 @@ export function loadCamps() {
       const blank = { lineIntro: '', lctCl: '', homepage: '', resveUrl: '', resveCl: '', operPdCl: '', operDeCl: '', sbrsCl: '', posblFcltyCl: '', themaEnvrnCl: '', animalCmgCl: '', trlerAcmpnyAt: '', caravAcmpnyAt: '', toiletCo: '', siteBottomCl1: '', siteBottomCl2: '', siteBottomCl3: '', siteBottomCl4: '', siteBottomCl5: '', firstImageUrl: '', tel: '' };
       for (const p of JSON.parse(readFileSync(pf, 'utf8')).pensions as Partial<Camp>[]) camps.push({ ...blank, ...p } as Camp);
     }
-    cache = { camps, syncedAt: raw.syncedAt as string };
+    cache = { camps, byId: new Map(camps.map((c) => [c.contentId, c])), syncedAt: raw.syncedAt as string };
   }
   return cache;
+}
+
+/** id로 숙소 찾기 */
+export function campById(id?: string) {
+  return id ? loadCamps().byId.get(id) : undefined;
 }
 
 /** 출발지 좌표 (길찾기 API 연결 전까지 쓰는 대략적인 도심 좌표) */

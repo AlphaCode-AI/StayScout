@@ -4,6 +4,7 @@
  */
 import { estimateMinutes, loadCamps, type Camp } from './data';
 import type { AgentState, ExtraPlace } from './types';
+import { nameCore } from './names';
 
 const cache = new Map<string, { at: number; docs: KakaoDoc[] }>();
 
@@ -19,11 +20,8 @@ interface KakaoDoc {
   y: string;
 }
 
-const norm = (s: string) =>
-  s
-    .replace(/\s|\(.*?\)|[&·,.\-_'"]/g, '')
-    .replace(/(오토캠핑장|캠핑장|야영장|글램핑장|글램핑|카라반|캠핑)$/g, '')
-    .toLowerCase();
+/** 괄호 속 설명("(구 ○○)")까지 빼고 이름 핵심만 비교해요 */
+const norm = (s: string) => nameCore(s.replace(/\(.*?\)/g, ''));
 
 /** 두 이름이 3글자 이상 같은 부분을 공유하는지 */
 function shares(a: string, b: string) {

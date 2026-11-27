@@ -197,7 +197,6 @@ function RankDelta({ c }: { c?: number | 'new' }) {
 export function ResultTable({
   columns,
   rows,
-  total,
   onAsk,
   layout = 'auto',
   changes,
@@ -206,7 +205,6 @@ export function ResultTable({
 }: {
   columns: Column[];
   rows: Row[];
-  total: number;
   onAsk: (t: string) => void;
   layout?: 'auto' | 'cards' | 'table';
   changes?: RankChanges;

@@ -193,7 +193,6 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [convId, setConvId] = useState(newId);
   const [history, setHistory] = useState<Conversation[]>([]);
-  const [animateId, setAnimateId] = useState<number | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [home, setHome] = useState<HomeT | null>(null);
   const [homeOpen, setHomeOpen] = useState(false);
@@ -237,7 +236,6 @@ export default function Home() {
       setConvId(newId());
       if (id) window.history.replaceState(null, '', window.location.pathname); // 없는 대화 주소면 정리
     }
-    setAnimateId(null);
     setView({ tab: 'results' });
     setClosedTabs(new Set());
     setSheetOpen(false);
@@ -279,10 +277,10 @@ export default function Home() {
 
   /** 결과를 먼저 보여 준 뒤 상위 곳들의 링크·평점·카카오맵 정보를 받아 그 답의 표에 채워요 */
   const enrich = async (msgId: number, rows: NonNullable<AgentReply['rows']>) => {
-    const items = rows.filter((r) => r.pending).map((r) => ({ id: r.id, url: r.reserve.url, mode: r.reserve.mode }));
+    const ids = rows.filter((r) => r.pending).map((r) => r.id);
     let got: { id: string; place?: Row['place']; google?: Row['google']; naver?: Row['naver']; reserve: Row['reserve'] }[] = [];
     try {
-      got = (await (await fetch('/api/enrich', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items }) })).json()).rows ?? [];
+      got = (await (await fetch('/api/enrich', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids }) })).json()).rows ?? [];
     } catch {
       // 못 받아도 표는 그대로 두고 "찾는 중" 표시만 지워요
     }
@@ -312,7 +310,6 @@ export default function Home() {
         const res = await fetch('/api/search', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: t, state, places: { home: home ?? undefined, ...extra }, profile: profile ?? undefined }) });
         const reply = (await res.json()) as AgentReply;
         const id = ++seq.current;
-        setAnimateId(id);
         setState(reply.state);
         setMsgs((m) => [...m, { id, role: 'agent', reply }]);
         if (reply.rows?.some((r) => r.pending)) void enrich(id, reply.rows);
@@ -402,7 +399,6 @@ export default function Home() {
       dirty.current = false;
       setMsgs([]);
       setConvId(newId());
-      setAnimateId(null);
       setPanelOpen(false);
       setView({ tab: 'results' });
       setClosedTabs(new Set());
@@ -418,7 +414,6 @@ export default function Home() {
     setMsgs([]);
     setState({ ...EMPTY, category: pickedCat === 'pension' ? 'pension' : undefined });
     setConvId(newId());
-    setAnimateId(null);
     setPanelOpen(false);
     setView({ tab: 'results' });
     setClosedTabs(new Set());
@@ -432,7 +427,6 @@ export default function Home() {
     setMsgs(c.msgs);
     setState(c.state);
     setConvId(c.id);
-    setAnimateId(null); // 다시 열 때는 탐색 애니메이션 없이 바로 보여 줘요
     seq.current = Math.max(0, ...c.msgs.map((m) => m.id));
     setPanelOpen(false);
     setView({ tab: 'results' });

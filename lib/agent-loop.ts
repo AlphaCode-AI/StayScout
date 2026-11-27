@@ -20,8 +20,9 @@ import {
   relaxOf,
   resultText,
   searchOf,
+  regions,
 } from './agent';
-import { evalCond, loadCamps, originCoords, type Camp } from './data';
+import { campById, evalCond, originCoords, type Camp } from './data';
 import { applyPlaces, mergeDelta } from './interpret';
 import { AGENT_MODELS, CATALOG, SCHEMA, dateContext, generate, type LlmResult } from './llm';
 import { parse } from './parse';
@@ -134,7 +135,7 @@ function systemPrompt(prev: AgentState) {
     petSize: prev.petSize,
     conditions: prev.conds.map((c) => ({ key: c.key, label: c.label, must: c.must })),
     lastResultCount: prev.lastIds?.length ?? 0,
-    방금_본_캠핑장: prev.focusId ? loadCamps().camps.find((c) => c.contentId === prev.focusId)?.facltNm : undefined,
+    방금_본_캠핑장: campById(prev.focusId)?.facltNm,
   };
   return `너는 StayScout, 사용자가 말한 조건에 맞는 "갈 수 있는 숙소"(캠핑장, 펜션·민박)를 찾아 주는 에이전트야.
 지금 찾는 종류: ${prev.category === 'pension' ? '펜션·민박' : '캠핑장'}. 사용자가 펜션·독채·풀빌라·민박을 말하면 update_conditions에 category "pension", 캠핑·글램핑·카라반을 말하면 "camp"를 넣어. 펜션은 객실 인원(people)과 1박 가격(maxPrice)도 조건이 돼. 펜션에는 캠핑 전용 조건(텐트, 화로대, 전기 등)을 넣지 마.
@@ -223,7 +224,7 @@ function resolveCamp(target: string, state: AgentState): { camp: Camp; rank: num
   const t = target.trim();
   const ids = state.lastIds ?? [];
   let camp: Camp | undefined;
-  if (/^(current|방금|이곳|여기)$/i.test(t)) camp = state.focusId ? loadCamps().camps.find((c) => c.contentId === state.focusId) : undefined;
+  if (/^(current|방금|이곳|여기)$/i.test(t)) camp = campById(state.focusId);
   else if (/^\d+$/.test(t)) camp = campByRank(state, Number(t));
   else {
     const found = lookupCampsByName(t);
@@ -271,7 +272,7 @@ type Part = { text?: string; functionCall?: { name: string; args?: Record<string
 export async function runAgentLoop(text: string, prev: AgentState, places?: Places): Promise<AgentReply | null> {
   if (!process.env.GEMINI_API_KEY) return null;
 
-  const regionNames = [...new Set(loadCamps().camps.map((c) => c.sigunguNm).filter(Boolean))];
+  const regionNames = regions();
   const originOk = (n: string) => !!originCoords(n);
   const rules = parse(text, prev, regionNames);
 

@@ -80,4 +80,4 @@ export const PENSION_EXAMPLE_GROUPS: ExampleGroup[] = [
     ],
   },
 ];
-
+export const PENSION_EXAMPLES = PENSION_EXAMPLE_GROUPS.flatMap((g) => g.items).map((e) => e.text);
